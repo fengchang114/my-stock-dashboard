@@ -46,7 +46,6 @@ def get_market_stocks():
             code = row.get('公司代號', '').strip()
             name = row.get('公司簡稱', '').strip()
             ind = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
-            # 排除條件: 00開頭(ETF), 長度>=6(權證), 名字包含KY
             if not code.startswith('00') and len(code) < 6 and 'KY' not in name:
                 stocks[code] = {'name': name, 'industry': ind, 'market': '上市'}
     except: pass
@@ -58,7 +57,6 @@ def get_market_stocks():
             code = row.get('公司代號', '').strip()
             name = row.get('公司簡稱', '').strip()
             ind = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
-            # 排除條件: 00開頭(ETF), 長度>=6(權證), 名字包含KY
             if not code.startswith('00') and len(code) < 6 and 'KY' not in name:
                 stocks[code] = {'name': name, 'industry': ind, 'market': '上櫃'}
     except: pass
@@ -161,8 +159,9 @@ def calculate_streaks(history_list):
 st.title("🔥 法人連續買賣超全市場掃描")
 st.markdown("自動掃描全市場，並已**排除 ETF、權證與 -KY 股**。")
 
-with st.sidebar:
-    st.header("設定")
+# --- 將選項移至主畫面 ---
+col1, col2 = st.columns([1, 3])
+with col1:
     target_date = st.date_input("選擇查詢日期", dt.date.today())
     run_btn = st.button("🚀 開始全市場掃描", use_container_width=True)
 
@@ -202,13 +201,11 @@ if run_btn:
 
     price_data = {}
     with st.spinner(f"正在透過 yfinance 下載 {len(yf_tickers)} 檔活躍個股股價與均量..."):
-        # 抓取兩個月資料確保能算出 MA20
         data = yf.download(yf_tickers, period="2mo", group_by='ticker', threads=True, progress=False, auto_adjust=True)
         for ticker in yf_tickers:
             df = data if len(yf_tickers) == 1 else data.get(ticker, pd.DataFrame())
             if not df.empty:
                 df.index = pd.to_datetime(df.index).normalize()
-                # 確保只取目標日期以前的資料
                 df = df[df.index <= pd.Timestamp(target_date)]
                 if len(df) > 20: 
                     price_data[ticker.split('.')[0]] = df
@@ -251,7 +248,6 @@ if run_btn:
             "投信": streak_info['last_chip']['t']
         }
 
-        # 分類買超
         if streak_info['max_buy'] > 0:
             r = row_base.copy()
             f_buy, t_buy = streak_info['f_buy'], streak_info['t_buy']
@@ -261,7 +257,6 @@ if run_btn:
             r["連續天數"], r["詳細說明"] = streak_info['max_buy'], desc
             buy_list.append(r)
 
-        # 分類賣超
         if streak_info['max_sell'] > 0:
             r = row_base.copy()
             f_sell, t_sell = streak_info['f_sell'], streak_info['t_sell']
@@ -275,16 +270,17 @@ if run_btn:
     df_buy = pd.DataFrame(buy_list)[cols_order].sort_values(by="連續天數", ascending=False) if buy_list else pd.DataFrame(columns=cols_order)
     df_sell = pd.DataFrame(sell_list)[cols_order].sort_values(by="連續天數", ascending=False) if sell_list else pd.DataFrame(columns=cols_order)
 
+    st.divider()
     st.success("✅ 全市場分析完成！")
     tab_buy, tab_sell = st.tabs(["🔥 連續買超清單", "🧊 連續賣超清單"])
     with tab_buy: st.dataframe(df_buy, hide_index=True, use_container_width=True)
     with tab_sell: st.dataframe(df_sell, hide_index=True, use_container_width=True)
 
-    # 產出 Excel 下載
+    # --- 下載按鈕也移回主畫面底部 ---
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_buy.to_excel(writer, sheet_name='法人連續買超', index=False)
         df_sell.to_excel(writer, sheet_name='法人連續賣超', index=False)
     output.seek(0)
     
-    st.sidebar.download_button("📥 下載結果報表 (Excel)", data=output, file_name=f"{target_date}_法人連續買賣超.xlsx", type="primary")
+    st.download_button("📥 下載結果報表 (Excel)", data=output, file_name=f"{target_date}_法人連續買賣超.xlsx", type="primary")

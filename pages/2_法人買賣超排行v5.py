@@ -106,13 +106,17 @@ def fetch_tpex_data(date_obj):
         return pd.merge(merged, df_pe, on='代號', how='left')
     except: return None
 
-# 網頁介面
+# ==========================================
+# 網頁主介面
+# ==========================================
 st.title("📊 法人買賣超排行 (含每股淨值)")
+st.markdown("追蹤外資、投信、自營商動向，並自動計算每股淨值。")
 
-with st.sidebar:
-    st.header("設定")
+# --- 將選項移至主畫面 ---
+col1, col2 = st.columns([1, 3])
+with col1:
     target_date = st.date_input("選擇查詢日期", datetime.date.today())
-    run_btn = st.button("開始抓取與分析", use_container_width=True)
+    run_btn = st.button("🚀 開始抓取與分析", use_container_width=True)
 
 if run_btn:
     with st.spinner("正在下載全市場資料與產業地圖..."):
@@ -121,7 +125,7 @@ if run_btn:
         df_tpex = fetch_tpex_data(target_date)
 
     if df_twse is None and df_tpex is None:
-        st.error(f"{target_date} 查無資料或休市。")
+        st.error(f"⚠️ {target_date} 查無資料，可能為假日或盤後資料尚未更新。")
     else:
         df_all = pd.concat([d for d in [df_twse, df_tpex] if d is not None], ignore_index=True)
         
@@ -156,16 +160,17 @@ if run_btn:
         df_buy = make_rank_df(df_stock, False).rename(columns={'法人買賣超': '法人買超'})
         df_sell = make_rank_df(df_stock, True).rename(columns={'法人買賣超': '法人賣超'})
 
+        st.divider()
         tab1, tab2 = st.tabs(["🚀 法人買超 Top 100", "🔻 法人賣超 Top 100"])
         with tab1: st.dataframe(df_buy, use_container_width=True, hide_index=True)
         with tab2: st.dataframe(df_sell, use_container_width=True, hide_index=True)
 
-        # 匯出 Excel
+        # --- 下載按鈕也移回主畫面底部 ---
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_buy.to_excel(writer, sheet_name='法人買超Top100', index=False)
             df_sell.to_excel(writer, sheet_name='法人賣超Top100', index=False)
         output.seek(0)
         
-        st.sidebar.success("✅ 分析完成！")
-        st.sidebar.download_button("📥 下載 Excel 報表", data=output, file_name=f"{target_date}_法人買賣超排行.xlsx", type="primary")
+        st.success("✅ 分析完成！")
+        st.download_button("📥 下載 Excel 報表", data=output, file_name=f"{target_date}_法人買賣超排行.xlsx", type="primary")
