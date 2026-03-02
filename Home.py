@@ -4,13 +4,16 @@ import requests
 import datetime
 import urllib3
 import re
+import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
 
 # ==========================================
-# 工具與抓取函式 (獨立在首頁運作)
+# 工具與抓取函式
 # ==========================================
 def convert_to_int(val):
     try:
@@ -21,7 +24,6 @@ def convert_to_int(val):
 def convert_to_float(val):
     try:
         val_str = str(val).strip()
-        # 排除無法轉換的字眼
         if val_str in ['-', '', 'nan', 'None', '---', '除息', '除權']: return 0.0
         return float(val_str.replace(',', ''))
     except: return 0.0
@@ -31,7 +33,6 @@ def fetch_market_data(date_str, roc_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
     
-    # 上市
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
@@ -50,11 +51,9 @@ def fetch_market_data(date_str, roc_date_str):
             df_list.append(df[['代碼', '商品', '成交', '漲跌', '成交量_股']])
     except: pass
 
-    # 🌟 上櫃 (強化版：同時防呆 aaData 與 tables 兩種格式)
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
-        
         raw_data = res.get('aaData', []) or (res.get('tables', [{}])[0].get('data', []) if res.get('tables') else [])
         if raw_data:
             df = pd.DataFrame(raw_data).iloc[:, [0, 1, 2, 3, 8]]
@@ -62,81 +61,143 @@ def fetch_market_data(date_str, roc_date_str):
             df_list.append(df)
     except: pass
     
-    if df_list:
-        return pd.concat(df_list, ignore_index=True)
+    if df_list: return pd.concat(df_list, ignore_index=True)
     return None
+
+def plot_kline(ticker, name):
+    """繪製帶有均線與趨勢線畫筆功能的 K 線圖"""
+    # 判斷上市或上櫃後綴
+    # 這裡做個簡單防呆，若是00開頭通常是上市 .TW，其他先試 .TW 若沒資料再試 .TWO
+    suffix = ".TW"
+    df = yf.download(f"{ticker}{suffix}", period="6mo", auto_adjust=True, progress=False)
+    if df.empty:
+        suffix = ".TWO"
+        df = yf.download(f"{ticker}{suffix}", period="6mo", auto_adjust=True, progress=False)
+        
+    if df.empty:
+        st.warning(f"無法取得 {name} ({ticker}) 的歷史股價資料。")
+        return
+
+    # 計算均線
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA60'] = df['Close'].rolling(window=60).mean()
+
+    # 建立包含 K 線與成交量的圖表 (2個子圖)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                        vertical_spacing=0.03, subplot_titles=(f'{name} ({ticker}) 日K線與均線', '成交量'), 
+                        row_width=[0.2, 0.7])
+
+    # 1. K線圖
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
+                                 low=df['Low'], close=df['Close'], name='K線',
+                                 increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
+    
+    # 2. 均線
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20 月線'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60 季線'), row=1, col=1)
+
+    # 3. 成交量
+    colors = ['red' if row['Close'] >= row['Open'] else 'green' for index, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='成交量'), row=2, col=1)
+
+    # 隱藏假日空白、開啟「畫趨勢線」功能
+    fig.update_layout(
+        xaxis_rangeslider_visible=False,
+        height=650,
+        margin=dict(l=20, r=20, t=40, b=20),
+        # 啟動 Plotly 畫筆工具：讓使用者可以自己畫線！
+        dragmode='drawline',
+        newshape=dict(line_color='yellow', line_width=2, opacity=1)
+    )
+    
+    # 隱藏下方子圖的 rangeslider
+    fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])])
+
+    # 顯示圖表，並在工具列加入畫線與橡皮擦按鈕
+    st.plotly_chart(fig, use_container_width=True, config={
+        'modeBarButtonsToAdd': ['drawline', 'eraseshape'],
+        'displaylogo': False
+    })
 
 # ==========================================
 # 首頁介面設計
 # ==========================================
 st.title("🏠 我的專屬投資儀表板")
-st.markdown("歡迎回來！請在下方管理您的持股，或透過左側選單使用進階盤後分析工具。")
+st.markdown("歡迎回來！請在下方管理您的持股，點擊按鈕即可畫出專屬 K 線與趨勢線。")
 st.divider()
 
 col1, col2 = st.columns([2, 1])
 with col1:
-    # 讓使用者可以自由編輯持股
     user_stocks_input = st.text_input(
-        "📝 編輯我的持股代碼 (可用代碼或加上名稱，例如：1815 富喬, 2317)：", 
-        value="2317, 2344, 3481, 1815, 1802, 6770"
+        "📝 編輯我的持股代碼 (可用代碼或加上名稱)：", 
+        value="6548 長科, 3297 杭特, 1815 富喬, 8112 星通, 0050, 2492 華新科"
     )
 with col2:
     selected_date = st.date_input("選擇看盤日期", datetime.date.today())
-    run_button = st.button("🔄 更新持股報價", use_container_width=True)
+    run_button = st.button("🔄 更新今日報價", use_container_width=True)
 
-if run_button or user_stocks_input:
-    # 🌟 強化輸入處理：自動抓出字串中的「數字代碼」與「中文字名稱」
-    # 1. 抓取所有 4~6 碼的連續數字作為代碼
-    my_codes = re.findall(r'\d{4,6}', user_stocks_input)
+# 解析使用者輸入
+my_codes = re.findall(r'\d{4,6}', user_stocks_input)
+cleaned_names = re.sub(r'[A-Za-z0-9,\s]', ' ', user_stocks_input).split()
+my_names = [n for n in cleaned_names if len(n) > 0]
+
+# --- 上半部：今日持股報價 ---
+query_date_str = selected_date.strftime('%Y%m%d')
+roc_year = selected_date.year - 1911
+roc_date_str = f"{roc_year}/{selected_date.strftime('%m/%d')}"
+
+with st.spinner('正在獲取最新報價...'):
+    df_all = fetch_market_data(query_date_str, roc_date_str)
+
+df_my_stocks = pd.DataFrame()
+if df_all is not None:
+    df_all['商品'] = df_all['商品'].str.strip()
+    df_all['代碼'] = df_all['代碼'].str.strip()
+    df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
+    df_all['成交量_張'] = df_all['成交量_股'] // 1000
+    df_all['成交'] = df_all['成交'].apply(convert_to_float)
+    df_all['漲跌'] = df_all['漲跌'].apply(convert_to_float)
+
+    def calc_pct(row):
+        close, change = row['成交'], row['漲跌']
+        prev_close = close - change
+        if prev_close > 0: return round((change / prev_close) * 100, 2)
+        return 0.0
+    df_all['漲幅%'] = df_all.apply(calc_pct, axis=1)
+
+    cond_code = df_all['代碼'].isin(my_codes)
+    cond_name = df_all['商品'].apply(lambda x: any(n in x for n in my_names) if my_names else False)
+    df_my_stocks = df_all[cond_code | cond_name].copy()
+
+st.subheader("💡 今日持股表現")
+if not df_my_stocks.empty:
+    df_display = df_my_stocks[['代碼', '商品', '成交', '漲跌', '漲幅%', '成交量_張']].sort_values(by='漲幅%', ascending=False)
+    st.dataframe(
+        df_display, 
+        hide_index=True, 
+        use_container_width=True,
+        column_config={
+            "漲幅%": st.column_config.NumberColumn(format="%.2f %%"),
+            "成交量_張": st.column_config.NumberColumn(format="%d 張")
+        }
+    )
+else:
+    st.info("今日無您的持股資料，或為假日未開盤。")
+
+# --- 下半部：K 線與趨勢線繪圖區 ---
+st.divider()
+st.subheader("📈 互動式 K 線與趨勢線分析")
+st.markdown("💡 **操作秘訣**：把滑鼠移到圖表右上角的工具列，點選「✏️ **Draw line**」，即可在圖表上拖曳畫出專屬的支撐線或壓力線！點擊「🧹 **Erase active shape**」即可擦除。")
+
+if not df_my_stocks.empty:
+    # 建立選單讓使用者挑選要看哪一檔股票的圖表
+    stock_options = [f"{row['代碼']} {row['商品']}" for _, row in df_display.iterrows()]
+    selected_stock = st.selectbox("選擇要查看圖表的股票：", stock_options)
     
-    # 2. 抓取可能的中文名稱 (移除數字與雜訊)
-    cleaned_names = re.sub(r'[A-Za-z0-9,\s]', ' ', user_stocks_input).split()
-    my_names = [n for n in cleaned_names if len(n) > 0]
-    
-    query_date_str = selected_date.strftime('%Y%m%d')
-    roc_year = selected_date.year - 1911
-    roc_date_str = f"{roc_year}/{selected_date.strftime('%m/%d')}"
-
-    with st.spinner('正在獲取最新報價...'):
-        df_all = fetch_market_data(query_date_str, roc_date_str)
-
-    if df_all is None:
-        st.error(f"⚠️ {selected_date} 查無資料，可能為假日或盤後資料尚未更新。")
-    else:
-        # 資料清洗
-        df_all['商品'] = df_all['商品'].str.strip()
-        df_all['代碼'] = df_all['代碼'].str.strip()
-        df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
-        df_all['成交量_張'] = df_all['成交量_股'] // 1000
-        df_all['成交'] = df_all['成交'].apply(convert_to_float)
-        df_all['漲跌'] = df_all['漲跌'].apply(convert_to_float)
-
-        def calc_pct(row):
-            close, change = row['成交'], row['漲跌']
-            prev_close = close - change
-            if prev_close > 0: return round((change / prev_close) * 100, 2)
-            return 0.0
-        df_all['漲幅%'] = df_all.apply(calc_pct, axis=1)
-
-        # 🌟 雙重包抄篩選：只要「代碼」符合，或是「商品名稱」包含輸入的字眼，就通通抓出來
-        cond_code = df_all['代碼'].isin(my_codes)
-        cond_name = df_all['商品'].apply(lambda x: any(n in x for n in my_names) if my_names else False)
+    if selected_stock:
+        # 拆解出純代號與名稱
+        target_ticker = selected_stock.split()[0]
+        target_name = selected_stock.split()[1]
         
-        df_my_stocks = df_all[cond_code | cond_name].copy()
-        
-        st.subheader("💡 今日持股表現")
-        if not df_my_stocks.empty:
-            df_my_stocks = df_my_stocks[['代碼', '商品', '成交', '漲跌', '漲幅%', '成交量_張']].sort_values(by='漲幅%', ascending=False)
-            st.dataframe(
-                df_my_stocks, 
-                hide_index=True, 
-                use_container_width=True,
-                column_config={
-                    "漲幅%": st.column_config.NumberColumn(format="%.2f %%"),
-                    "成交量_張": st.column_config.NumberColumn(format="%d 張")
-                }
-            )
-        else:
-
-            st.info("今日無您的持股資料，或輸入的代碼有誤。")
-
+        with st.spinner(f"正在載入 {target_name} 的歷史K線..."):
+            plot_kline(target_ticker, target_name)
