@@ -8,6 +8,9 @@ import io
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="法人買賣超排行", layout="wide")
 
+# ==========================================
+# 產業地圖與工具
+# ==========================================
 INDUSTRY_CODE_MAP = {
     "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維",
     "05": "電機機械", "06": "電器電纜", "07": "化學生技醫療", "08": "玻璃陶瓷",
@@ -41,22 +44,63 @@ def get_industry_map():
     return industry_map
 
 @st.cache_data(ttl=3600)
+def fetch_kline_data(ticker):
+    """抓取 Yahoo Finance 歷史資料作為校準基準 (自動調整除權息)"""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    for suffix in ['.TW', '.TWO']:
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
+            res = requests.get(url, headers=headers, timeout=5)
+            data = res.json()
+            result = data.get('chart', {}).get('result')
+            if result:
+                timestamps = result[0]['timestamp']
+                adj_close = result[0]['indicators']['adjclose'][0]['adjclose']
+                df = pd.DataFrame({'Close': adj_close})
+                df.index = pd.to_datetime(timestamps, unit='s') + pd.Timedelta(hours=8)
+                df.index = df.index.normalize()
+                return df.dropna()
+        except: continue
+    return pd.DataFrame()
+
+# ==========================================
+# 官方大盤資料抓取
+# ==========================================
+@st.cache_data(ttl=3600)
 def fetch_twse_data(date_obj):
     date_str = date_obj.strftime('%Y%m%d')
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
+        # 1. 籌碼
         url_chips = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str}&selectType=ALL&response=json"
         res = requests.get(url_chips, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') != 'OK': return None
         df_chips = pd.DataFrame(res['data'], columns=res['fields']).iloc[:, [0, 1, 4, 10, 11]]
         df_chips.columns = ['代號', '名稱', '外資', '投信', '自營商']
 
+        # 2. 報價 (採用與首頁相同的強力防呆：取最大表)
         url_price = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res_price = requests.get(url_price, headers=headers, verify=False, timeout=10).json()
-        target_table = next((t for t in res_price.get('tables', []) if '收盤價' in t['fields']), None)
-        df_price = pd.DataFrame(target_table['data'], columns=target_table['fields'])[['證券代號', '成交股數', '收盤價', '漲跌(+/-)', '漲跌價差']]
-        df_price.columns = ['代號', '成交量_股', '收盤價', '漲跌符號', '漲跌價差']
+        valid_tables = [t for t in res_price.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])]
+        if valid_tables:
+            target_table = max(valid_tables, key=lambda x: len(x.get('data', [])))
+            fields = target_table['fields']
+            df_price = pd.DataFrame(target_table['data'], columns=fields)
+            sign_col = next((c for c in fields if '漲跌' in c and '價差' not in c), '漲跌(+/-)')
+            df_price = df_price[['證券代號', '成交股數', '收盤價', sign_col, '漲跌價差']]
+            df_price.columns = ['代號', '成交量_股', '收盤價', '漲跌符號', '漲跌價差']
+            
+            def calc_change(row):
+                sign, val = str(row['漲跌符號']).lower(), str(row['漲跌價差'])
+                try:
+                    v = float(val.replace(',', ''))
+                    return v * -1 if 'green' in sign or '-' in sign else v
+                except: return 0.0
+            df_price['漲跌'] = df_price.apply(calc_change, axis=1)
+        else:
+            df_price = pd.DataFrame(columns=['代號', '成交量_股', '收盤價', '漲跌'])
 
+        # 3. 本益比
         url_pe = f"https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date={date_str}&selectType=ALL&response=json"
         res_pe = requests.get(url_pe, headers=headers, verify=False, timeout=10).json()
         if res_pe.get('stat') == 'OK':
@@ -64,14 +108,6 @@ def fetch_twse_data(date_obj):
             df_pe.columns = ['代號', '本益比', '股價淨值比']
         else: df_pe = pd.DataFrame(columns=['代號', '本益比', '股價淨值比'])
 
-        def calc_change(row):
-            sign, val = str(row['漲跌符號']).lower(), str(row['漲跌價差'])
-            try:
-                v = float(val.replace(',', ''))
-                return v * -1 if 'green' in sign or '-' in sign else v
-            except: return 0.0
-        
-        df_price['漲跌'] = df_price.apply(calc_change, axis=1)
         merged = pd.merge(df_chips, df_price[['代號', '收盤價', '漲跌', '成交量_股']], on='代號', how='left')
         return pd.merge(merged, df_pe, on='代號', how='left')
     except: return None
@@ -82,6 +118,7 @@ def fetch_tpex_data(date_obj):
     date_str = f"{roc_year}/{date_obj.strftime('%m/%d')}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
+        # 1. 籌碼
         url_chips = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={date_str}"
         res = requests.get(url_chips, headers=headers, verify=False, timeout=10).json()
         raw = res.get('aaData') or (res.get('tables')[0]['data'] if res.get('tables') else [])
@@ -89,11 +126,13 @@ def fetch_tpex_data(date_obj):
         df_chips = pd.DataFrame(raw).iloc[:, [0, 1, 10, 13, 22]]
         df_chips.columns = ['代號', '名稱', '外資', '投信', '自營商']
 
+        # 2. 報價
         url_price = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={date_str}"
         res_price = requests.get(url_price, headers=headers, verify=False, timeout=10).json()
         df_price = pd.DataFrame(res_price['aaData']).iloc[:, [0, 2, 3, 8]]
         df_price.columns = ['代號', '收盤價', '漲跌', '成交量_股']
 
+        # 3. 本益比
         url_pe = f"https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={date_str}"
         res_pe = requests.get(url_pe, headers=headers, verify=False, timeout=10).json()
         raw_pe = res_pe.get('tables', [{}])[0].get('data', []) or res_pe.get('aaData', [])
@@ -109,17 +148,16 @@ def fetch_tpex_data(date_obj):
 # ==========================================
 # 網頁主介面
 # ==========================================
-st.title("📊 法人買賣超排行 (含每股淨值)")
-st.markdown("追蹤外資、投信、自營商動向，並自動計算每股淨值。")
+st.title("📊 法人買賣超排行 (精準校正版)")
+st.markdown("追蹤外資、投信、自營商動向，並自動校準前200檔熱門股之真實股價與漲幅。")
 
-# --- 將選項移至主畫面 ---
 col1, col2 = st.columns([1, 3])
 with col1:
     target_date = st.date_input("選擇查詢日期", datetime.date.today())
-    run_btn = st.button("🚀 開始抓取與分析", use_container_width=True)
+    run_btn = st.button("🚀 開始抓取與精算", use_container_width=True)
 
 if run_btn:
-    with st.spinner("正在下載全市場資料與產業地圖..."):
+    with st.spinner("正在下載全市場籌碼與產業地圖..."):
         industry_map = get_industry_map()
         df_twse = fetch_twse_data(target_date)
         df_tpex = fetch_tpex_data(target_date)
@@ -129,7 +167,7 @@ if run_btn:
     else:
         df_all = pd.concat([d for d in [df_twse, df_tpex] if d is not None], ignore_index=True)
         
-        # 數值轉換與處理
+        # 轉換數值
         for col in ['外資', '投信', '自營商', '成交量_股']:
             df_all[col] = pd.to_numeric(df_all[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(int)
         
@@ -142,35 +180,86 @@ if run_btn:
         for col in ['收盤價', '漲跌', '本益比', '股價淨值比']:
             df_all[col] = df_all[col].apply(convert_to_float)
 
-        # 計算每股淨值
-        df_all['每股淨值'] = df_all.apply(lambda r: round(r['收盤價'] / r['股價淨值比'], 2) if r['股價淨值比'] > 0 else 0, axis=1)
-
-        # 篩選與整理
+        # 篩選股票 (排除 ETF、權證)
         df_all['代號'] = df_all['代號'].astype(str).str.strip()
         df_stock = df_all[~df_all['代號'].str.startswith('00') & (df_all['代號'].str.len() < 6)].copy()
         df_stock['產業類別'] = df_stock['代號'].map(industry_map).fillna('其他')
 
-        output_cols = ['排名', '代號', '名稱', '產業類別', '收盤價', '漲跌', '成交量', '外資', '投信', '自營商', '法人買賣超', '本益比', '股價淨值比', '每股淨值']
+        # 抓出前 100 買超與前 100 賣超
+        df_buy_raw = df_stock.sort_values(by='法人買賣超', ascending=False).head(100).copy()
+        df_sell_raw = df_stock.sort_values(by='法人買賣超', ascending=True).head(100).copy()
+        
+        # 🌟 核心升級：針對這 200 檔股票，向 Yahoo API 獲取最精準的價格與漲幅
+        unique_tickers = list(set(df_buy_raw['代號'].tolist() + df_sell_raw['代號'].tolist()))
+        calibrated_data = {}
+        target_ts = pd.Timestamp(target_date).normalize()
+        
+        progress_text = "正在透過 Yahoo 歷史資料精算前 200 大熱門股之真實股價與漲跌幅..."
+        my_bar = st.progress(0, text=progress_text)
+        
+        for i, code in enumerate(unique_tickers):
+            df_k = fetch_kline_data(code)
+            if not df_k.empty:
+                if target_ts in df_k.index:
+                    k_today = df_k.loc[target_ts]
+                    past_data = df_k[df_k.index < target_ts]
+                else:
+                    k_today = df_k.iloc[-1]
+                    past_data = df_k.iloc[:-1]
+                    
+                if not past_data.empty:
+                    yest_close = past_data.iloc[-1]['Close']
+                    price = float(k_today['Close'])
+                    change = price - yest_close
+                    pct = (change / yest_close) * 100
+                    calibrated_data[code] = {
+                        '精準收盤價': round(price, 2),
+                        '精準漲跌': round(change, 2),
+                        '漲幅%': round(pct, 2)
+                    }
+            my_bar.progress((i + 1) / len(unique_tickers), text=f"{progress_text} ({i+1}/{len(unique_tickers)})")
+        my_bar.empty()
 
-        def make_rank_df(df, asc):
-            res = df.sort_values(by='法人買賣超', ascending=asc).head(100).copy().reset_index(drop=True)
-            res['排名'] = res.index + 1
-            return res[output_cols]
+        # 將精算結果合併回表單
+        def apply_calibration(df_target):
+            df_target['漲幅%'] = 0.0
+            for idx, row in df_target.iterrows():
+                code = row['代號']
+                if code in calibrated_data:
+                    df_target.at[idx, '收盤價'] = calibrated_data[code]['精準收盤價']
+                    df_target.at[idx, '漲跌'] = calibrated_data[code]['精準漲跌']
+                    df_target.at[idx, '漲幅%'] = calibrated_data[code]['漲幅%']
+                else:
+                    # 無法校準的，使用原始靜態資料算個大概
+                    close_p, change_p = row['收盤價'], row['漲跌']
+                    prev_c = close_p - change_p
+                    if prev_c > 0: df_target.at[idx, '漲幅%'] = round((change_p / prev_c) * 100, 2)
+            
+            # 重新計算每股淨值 (因為收盤價可能更新了)
+            df_target['每股淨值'] = df_target.apply(lambda r: round(r['收盤價'] / r['股價淨值比'], 2) if r['股價淨值比'] > 0 else 0, axis=1)
+            
+            df_target = df_target.reset_index(drop=True)
+            df_target['排名'] = df_target.index + 1
+            return df_target
 
-        df_buy = make_rank_df(df_stock, False).rename(columns={'法人買賣超': '法人買超'})
-        df_sell = make_rank_df(df_stock, True).rename(columns={'法人買賣超': '法人賣超'})
+        output_cols = ['排名', '代號', '名稱', '產業類別', '收盤價', '漲跌', '漲幅%', '成交量', '外資', '投信', '自營商', '法人買賣超', '本益比', '股價淨值比', '每股淨值']
+
+        df_buy = apply_calibration(df_buy_raw)[output_cols].rename(columns={'法人買賣超': '法人買超'})
+        df_sell = apply_calibration(df_sell_raw)[output_cols].rename(columns={'法人買賣超': '法人賣超'})
 
         st.divider()
         tab1, tab2 = st.tabs(["🚀 法人買超 Top 100", "🔻 法人賣超 Top 100"])
-        with tab1: st.dataframe(df_buy, use_container_width=True, hide_index=True)
-        with tab2: st.dataframe(df_sell, use_container_width=True, hide_index=True)
+        with tab1: 
+            st.dataframe(df_buy, use_container_width=True, hide_index=True, column_config={"漲幅%": st.column_config.NumberColumn(format="%.2f %%")})
+        with tab2: 
+            st.dataframe(df_sell, use_container_width=True, hide_index=True, column_config={"漲幅%": st.column_config.NumberColumn(format="%.2f %%")})
 
-        # --- 下載按鈕也移回主畫面底部 ---
+        # 產出 Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df_buy.to_excel(writer, sheet_name='法人買超Top100', index=False)
             df_sell.to_excel(writer, sheet_name='法人賣超Top100', index=False)
         output.seek(0)
         
-        st.success("✅ 分析完成！")
+        st.success("✅ 分析與精算完成！")
         st.download_button("📥 下載 Excel 報表", data=output, file_name=f"{target_date}_法人買賣超排行.xlsx", type="primary")
