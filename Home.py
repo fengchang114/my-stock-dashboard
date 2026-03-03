@@ -130,7 +130,7 @@ col1, col2 = st.columns([2, 1])
 with col1:
     user_stocks_input = st.text_input(
         "📝 編輯我的持股代碼 (可用代碼或加上名稱)：", 
-        value="2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 1815 富喬"
+        value="2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 009816"
     )
 with col2:
     selected_date = st.date_input("選擇看盤日期", datetime.date.today())
@@ -204,3 +204,4 @@ if not df_my_stocks.empty:
         with st.spinner(f"正在載入 {target_name} 的歷史K線..."):
 
             plot_kline(target_ticker, target_name)
+
