@@ -33,24 +33,30 @@ def fetch_market_data(date_str, roc_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
     
+    # 抓取上市 (TWSE)
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
-            target_table = next((t for t in res.get('tables', []) if '收盤價' in t['fields']), None)
-            df = pd.DataFrame(target_table['data'], columns=target_table['fields'])
-            df = df[['證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數']]
-            df.columns = ['代碼', '商品', '成交', '漲跌符號', '漲跌價差', '成交量_股']
-            def calc_change(row):
-                sign, val = str(row['漲跌符號']).lower(), str(row['漲跌價差'])
-                try:
-                    v = float(val.replace(',', ''))
-                    return v * -1 if 'green' in sign or '-' in sign else v
-                except: return 0.0
-            df['漲跌'] = df.apply(calc_change, axis=1)
-            df_list.append(df[['代碼', '商品', '成交', '漲跌', '成交量_股']])
+            # 【關鍵修正1】精確定位包含所有必要欄位的表格，避免被證交所新增的統計表干擾
+            req_cols = {'證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數'}
+            target_table = next((t for t in res.get('tables', []) if req_cols.issubset(set(t.get('fields', [])))), None)
+            
+            if target_table:
+                df = pd.DataFrame(target_table['data'], columns=target_table['fields'])
+                df = df[['證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數']]
+                df.columns = ['代碼', '商品', '成交', '漲跌符號', '漲跌價差', '成交量_股']
+                def calc_change(row):
+                    sign, val = str(row['漲跌符號']).lower(), str(row['漲跌價差'])
+                    try:
+                        v = float(val.replace(',', ''))
+                        return v * -1 if 'green' in sign or '-' in sign else v
+                    except: return 0.0
+                df['漲跌'] = df.apply(calc_change, axis=1)
+                df_list.append(df[['代碼', '商品', '成交', '漲跌', '成交量_股']])
     except: pass
 
+    # 抓取上櫃 (TPEx)
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
@@ -65,9 +71,6 @@ def fetch_market_data(date_str, roc_date_str):
     return None
 
 def plot_kline(ticker, name):
-    """繪製帶有均線與趨勢線畫筆功能的 K 線圖 (使用穩定版 API)"""
-    
-    # 使用 yf.Ticker() 避免 MultiIndex 報錯問題
     stock = yf.Ticker(f"{ticker}.TW")
     df = stock.history(period="6mo")
     
@@ -79,29 +82,23 @@ def plot_kline(ticker, name):
         st.warning(f"⚠️ 無法取得 {name} ({ticker}) 的歷史股價資料，請稍後再試。")
         return
 
-    # 確保資料格式正確並計算均線
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
 
-    # 建立包含 K 線與成交量的圖表 (2個子圖)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.03, subplot_titles=(f'{name} ({ticker}) 日K線與均線', '成交量'), 
                         row_width=[0.2, 0.7])
 
-    # 1. K線圖
     fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'],
                                  low=df['Low'], close=df['Close'], name='K線',
                                  increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
     
-    # 2. 均線
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20 月線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60 季線'), row=1, col=1)
 
-    # 3. 成交量
     colors = ['red' if row['Close'] >= row['Open'] else 'green' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='成交量'), row=2, col=1)
 
-    # 隱藏假日空白、開啟「畫趨勢線」功能
     fig.update_layout(
         xaxis_rangeslider_visible=False,
         height=650,
@@ -110,10 +107,8 @@ def plot_kline(ticker, name):
         newshape=dict(line_color='yellow', line_width=2, opacity=1)
     )
     
-    # 隱藏下方子圖的 rangeslider
     fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])])
 
-    # 顯示圖表
     st.plotly_chart(fig, use_container_width=True, config={
         'modeBarButtonsToAdd': ['drawline', 'eraseshape'],
         'displaylogo': False
@@ -136,12 +131,10 @@ with col2:
     selected_date = st.date_input("選擇看盤日期", datetime.date.today())
     run_button = st.button("🔄 更新今日報價", use_container_width=True)
 
-# 解析使用者輸入
 my_codes = re.findall(r'\d{4,6}', user_stocks_input)
 cleaned_names = re.sub(r'[A-Za-z0-9,\s]', ' ', user_stocks_input).split()
 my_names = [n for n in cleaned_names if len(n) > 0]
 
-# --- 上半部：今日持股報價 ---
 query_date_str = selected_date.strftime('%Y%m%d')
 roc_year = selected_date.year - 1911
 roc_date_str = f"{roc_year}/{selected_date.strftime('%m/%d')}"
@@ -154,8 +147,10 @@ if df_all is not None:
     df_all['商品'] = df_all['商品'].str.strip()
     df_all['代碼'] = df_all['代碼'].str.strip()
     
-    # 🌟 關鍵修正：直接排除所有長度 >= 6 碼的權證、牛熊證
-    df_all = df_all[df_all['代碼'].str.len() < 6].copy()
+    # 【關鍵修正2】排除長度 >= 6 碼的權證，但「豁免」使用者手動輸入的代碼 (保護 009816 不被刪除)
+    cond_length = df_all['代碼'].str.len() < 6
+    cond_user_explicit = df_all['代碼'].isin(my_codes)
+    df_all = df_all[cond_length | cond_user_explicit].copy()
     
     df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
     df_all['成交量_張'] = df_all['成交量_股'] // 1000
@@ -186,9 +181,8 @@ if not df_my_stocks.empty:
         }
     )
 else:
-    st.info("今日無您的持股資料，或為假日未開盤。")
+    st.info("今日無您的持股資料，請確認日期是否為假日或盤中未產生資料。")
 
-# --- 下半部：K 線與趨勢線繪圖區 ---
 st.divider()
 st.subheader("📈 互動式 K 線與趨勢線分析")
 st.markdown("💡 **操作秘訣**：把滑鼠移到圖表右上角的工具列，點選「✏️ **Draw line**」，即可在圖表上拖曳畫出專屬的支撐線或壓力線！")
@@ -202,6 +196,4 @@ if not df_my_stocks.empty:
         target_name = selected_stock.split()[1]
         
         with st.spinner(f"正在載入 {target_name} 的歷史K線..."):
-
             plot_kline(target_ticker, target_name)
-
