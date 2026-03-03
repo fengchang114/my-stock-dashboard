@@ -148,7 +148,7 @@ def fetch_tpex_data(date_obj):
 # ==========================================
 # 網頁主介面
 # ==========================================
-st.title("📊 法人買賣超排行 (精準校正版)")
+st.title("📊 法人買賣超排行")
 st.markdown("追蹤外資、投信、自營商動向，並自動校準前200檔熱門股之真實股價與漲幅。")
 
 col1, col2 = st.columns([1, 3])
@@ -263,3 +263,4 @@ if run_btn:
         
         st.success("✅ 分析與精算完成！")
         st.download_button("📥 下載 Excel 報表", data=output, file_name=f"{target_date}_法人買賣超排行.xlsx", type="primary")
+
