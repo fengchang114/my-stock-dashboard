@@ -110,6 +110,8 @@ def plot_kline(ticker, name):
         st.warning(f"⚠️ 無法取得 {name} ({ticker}) 的歷史股價資料，請稍後再試。")
         return
 
+    # 🌟 新增 5 日均線 (MA5)，並保留原本的 MA20 與 MA60
+    df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
 
@@ -121,6 +123,8 @@ def plot_kline(ticker, name):
                                  low=df['Low'], close=df['Close'], name='K線',
                                  increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
     
+    # 🌟 畫出三條均線 (設定不同顏色以利辨識)
+    fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', line=dict(color='purple', width=1.5), name='MA5 周線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20 月線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60 季線'), row=1, col=1)
 
@@ -132,7 +136,8 @@ def plot_kline(ticker, name):
         height=650,
         margin=dict(l=20, r=20, t=40, b=20),
         dragmode='drawline',
-        newshape=dict(line_color='yellow', line_width=2, opacity=1)
+        # 🌟 將畫筆顏色改為黑色 (black)，線條加粗，這樣會清楚很多
+        newshape=dict(line_color='black', line_width=2, opacity=1)
     )
     
     fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])])
@@ -227,3 +232,4 @@ if not df_my_stocks.empty:
         
         with st.spinner(f"正在載入 {target_name} 的歷史K線..."):
             plot_kline(target_ticker, target_name)
+
