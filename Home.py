@@ -32,17 +32,20 @@ def fetch_market_data(date_str, roc_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
     
-    # 上市
+    # 🌟 修正1：上市 (TWSE) 動態抓取欄位，避免被嚴格防呆誤殺
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
-            req_cols = {'證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數'}
-            target_table = next((t for t in res.get('tables', []) if req_cols.issubset(set(t.get('fields', [])))), None)
+            target_table = next((t for t in res.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])), None)
             
             if target_table:
-                df = pd.DataFrame(target_table['data'], columns=target_table['fields'])
-                df = df[['證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數']]
+                fields = target_table['fields']
+                df = pd.DataFrame(target_table['data'], columns=fields)
+                
+                sign_col = next((c for c in fields if '漲跌' in c and '價差' not in c), '漲跌(+/-)')
+                
+                df = df[['證券代號', '證券名稱', '收盤價', sign_col, '漲跌價差', '成交股數']]
                 df.columns = ['代碼', '商品', '成交', '漲跌符號', '漲跌價差', '成交量_股']
                 def calc_change(row):
                     sign, val = str(row['漲跌符號']).lower(), str(row['漲跌價差'])
@@ -54,9 +57,9 @@ def fetch_market_data(date_str, roc_date_str):
                 df_list.append(df[['代碼', '商品', '成交', '漲跌', '成交量_股']])
     except: pass
 
-    # 上櫃
+    # 上櫃 (TPEx)
     try:
-        url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
+        url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}&se=AL"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
         raw_data = res.get('aaData', []) or (res.get('tables', [{}])[0].get('data', []) if res.get('tables') else [])
         if raw_data:
@@ -70,47 +73,33 @@ def fetch_market_data(date_str, roc_date_str):
 
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
-    """🌟 繞過 yfinance 限流封鎖，直接呼叫 Yahoo Public API 獲取 K 線資料"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    
-    # 輪流測試上市(.TW)與上櫃(.TWO)
     for suffix in ['.TW', '.TWO']:
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
             res = requests.get(url, headers=headers, timeout=5)
             data = res.json()
             result = data.get('chart', {}).get('result')
-            
             if result:
                 timestamps = result[0]['timestamp']
                 quote = result[0]['indicators']['quote'][0]
                 df = pd.DataFrame({
-                    'Open': quote['open'],
-                    'High': quote['high'],
-                    'Low': quote['low'],
-                    'Close': quote['close'],
-                    'Volume': quote['volume']
+                    'Open': quote['open'], 'High': quote['high'], 'Low': quote['low'],
+                    'Close': quote['close'], 'Volume': quote['volume']
                 })
-                # 轉換為台灣時間並對齊日期
                 df.index = pd.to_datetime(timestamps, unit='s') + pd.Timedelta(hours=8)
                 df.index = df.index.normalize()
                 df = df.dropna()
-                
-                if not df.empty:
-                    return df
-        except:
-            continue
-            
+                if not df.empty: return df
+        except: continue
     return pd.DataFrame()
 
 def plot_kline(ticker, name):
     df = fetch_kline_data(ticker)
-        
     if df.empty:
         st.warning(f"⚠️ 無法取得 {name} ({ticker}) 的歷史股價資料，請稍後再試。")
         return
 
-    # 🌟 新增 5 日均線 (MA5)，並保留原本的 MA20 與 MA60
     df['MA5'] = df['Close'].rolling(window=5).mean()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
@@ -123,7 +112,6 @@ def plot_kline(ticker, name):
                                  low=df['Low'], close=df['Close'], name='K線',
                                  increasing_line_color='red', decreasing_line_color='green'), row=1, col=1)
     
-    # 🌟 畫出三條均線 (設定不同顏色以利辨識)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', line=dict(color='purple', width=1.5), name='MA5 周線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20 月線'), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60 季線'), row=1, col=1)
@@ -132,20 +120,13 @@ def plot_kline(ticker, name):
     fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=colors, name='成交量'), row=2, col=1)
 
     fig.update_layout(
-        xaxis_rangeslider_visible=False,
-        height=650,
-        margin=dict(l=20, r=20, t=40, b=20),
+        xaxis_rangeslider_visible=False, height=650, margin=dict(l=20, r=20, t=40, b=20),
         dragmode='drawline',
-        # 🌟 將畫筆顏色改為黑色 (black)，線條加粗，這樣會清楚很多
         newshape=dict(line_color='black', line_width=2, opacity=1)
     )
     
     fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])])
-
-    st.plotly_chart(fig, use_container_width=True, config={
-        'modeBarButtonsToAdd': ['drawline', 'eraseshape'],
-        'displaylogo': False
-    })
+    st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape'], 'displaylogo': False})
 
 # ==========================================
 # 首頁介面設計
@@ -180,11 +161,6 @@ if df_all is not None:
     df_all['商品'] = df_all['商品'].str.strip()
     df_all['代碼'] = df_all['代碼'].str.strip()
     
-    # 排除長度 >= 6 碼的權證，但「豁免」使用者手動輸入的代碼 (保護 009816)
-    cond_length = df_all['代碼'].str.len() < 6
-    cond_user_explicit = df_all['代碼'].isin(my_codes)
-    df_all = df_all[cond_length | cond_user_explicit].copy()
-    
     df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
     df_all['成交量_張'] = df_all['成交量_股'] // 1000
     df_all['成交'] = df_all['成交'].apply(convert_to_float)
@@ -197,8 +173,9 @@ if df_all is not None:
         return 0.0
     df_all['漲幅%'] = df_all.apply(calc_pct, axis=1)
 
+    # 🌟 修正2：改為精準比對，徹底排除「可轉債 (富喬一)」與「權證」的干擾
     cond_code = df_all['代碼'].isin(my_codes)
-    cond_name = df_all['商品'].apply(lambda x: any(n in x for n in my_names) if my_names else False)
+    cond_name = df_all['商品'].isin(my_names)
     df_my_stocks = df_all[cond_code | cond_name].copy()
 
 st.subheader("💡 今日持股表現")
@@ -232,4 +209,3 @@ if not df_my_stocks.empty:
         
         with st.spinner(f"正在載入 {target_name} 的歷史K線..."):
             plot_kline(target_ticker, target_name)
-
