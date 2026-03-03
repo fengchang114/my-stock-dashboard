@@ -4,19 +4,36 @@ import requests
 import datetime
 import urllib3
 import re
+import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
+
+# ==========================================
+# 迷你資料庫：存取持股清單
+# ==========================================
+HOLDINGS_FILE = "my_holdings.txt"
+DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 009816"
+
+def load_holdings():
+    """讀取存檔的持股清單"""
+    if os.path.exists(HOLDINGS_FILE):
+        with open(HOLDINGS_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return DEFAULT_HOLDINGS
+
+def save_holdings(holdings_str):
+    """將持股清單存入檔案"""
+    with open(HOLDINGS_FILE, "w", encoding="utf-8") as f:
+        f.write(holdings_str)
 
 # ==========================================
 # 工具與抓取函式
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
-    """抓取 Yahoo Finance 歷史資料 (自動調整除權息)"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     for suffix in ['.TW', '.TWO']:
         try:
@@ -27,7 +44,6 @@ def fetch_kline_data(ticker):
             if result:
                 timestamps = result[0]['timestamp']
                 quote = result[0]['indicators']['quote'][0]
-                # 使用 adjusted close (除權息修正後的收盤價)
                 adj_close = result[0]['indicators']['adjclose'][0]['adjclose']
                 df = pd.DataFrame({
                     'Close': adj_close,
@@ -42,10 +58,8 @@ def fetch_kline_data(ticker):
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(date_str, roc_date_str):
-    """抓取證交所與櫃買中心大盤資料 (用來自動配對官方名稱)"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
-    
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
@@ -59,7 +73,6 @@ def fetch_market_data(date_str, roc_date_str):
                 df_clean['商品'] = df.iloc[:, 1].str.strip()
                 df_list.append(df_clean)
     except: pass
-
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
@@ -71,7 +84,6 @@ def fetch_market_data(date_str, roc_date_str):
             df_clean['商品'] = df.iloc[:, 1].str.strip()
             df_list.append(df_clean)
     except: pass
-    
     return pd.concat(df_list, ignore_index=True) if df_list else None
 
 # ==========================================
@@ -80,11 +92,23 @@ def fetch_market_data(date_str, roc_date_str):
 st.title("🏠 我的投資儀表板")
 st.divider()
 
-user_stocks_input = st.text_input("📝 持股清單 (格式如: 2317 鴻海, 1815 富喬)：", 
-                                  value="2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 009816")
-selected_date = st.date_input("選擇日期", datetime.date.today())
+# 讀取存檔的持股
+current_saved_holdings = load_holdings()
 
-# 1. 解析輸入，提取代碼與自訂名稱
+col1, col2, col3 = st.columns([4, 1, 1])
+with col1:
+    user_stocks_input = st.text_input("📝 持股清單：", value=current_saved_holdings)
+with col2:
+    selected_date = st.date_input("選擇日期", datetime.date.today())
+with col3:
+    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+    save_btn = st.button("💾 儲存為預設", use_container_width=True)
+
+if save_btn:
+    save_holdings(user_stocks_input)
+    st.success("✅ 持股清單已成功存檔！下次開啟將自動讀取。")
+
+# 解析輸入
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
 user_name_map = {}
@@ -100,7 +124,6 @@ for p in pairs:
 target_ts = pd.Timestamp(selected_date).normalize()
 
 with st.spinner('同步官方名稱與精準行情中...'):
-    # 2. 抓取官方資料庫，用來自動補齊商品名稱
     df_all = fetch_market_data(selected_date.strftime('%Y%m%d'), f"{selected_date.year-1911}/{selected_date.strftime('%m/%d')}")
     api_name_map = {}
     if df_all is not None and not df_all.empty:
@@ -108,9 +131,7 @@ with st.spinner('同步官方名稱與精準行情中...'):
 
     final_rows = []
     for code in my_codes:
-        # 🌟 命名邏輯：官方 API 名稱 > 使用者輸入名稱 > 直接顯示代碼
         name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
-        
         df_k = fetch_kline_data(code)
         if not df_k.empty:
             if target_ts in df_k.index:
@@ -127,11 +148,8 @@ with st.spinner('同步官方名稱與精準行情中...'):
                 pct = (change / yest_close) * 100
                 
                 final_rows.append({
-                    '代碼': code, 
-                    '商品': name,
-                    '成交': round(price, 2), 
-                    '漲跌': round(change, 2), 
-                    '漲幅%': round(pct, 2),
+                    '代碼': code, '商品': name,
+                    '成交': round(price, 2), '漲跌': round(change, 2), '漲幅%': round(pct, 2),
                     '成交量(張)': int(k_today['Volume'] / 1000)
                 })
 
@@ -140,14 +158,8 @@ if final_rows:
     df_final = pd.DataFrame(final_rows).sort_values(by='漲幅%', ascending=False)
     st.subheader(f"💡 {selected_date} 持股表現")
     st.dataframe(
-        df_final, 
-        hide_index=True, 
-        use_container_width=True,
-        column_config={
-            "漲幅%": st.column_config.NumberColumn(format="%.2f %%"),
-            "成交": st.column_config.NumberColumn(format="%.2f"),
-            "漲跌": st.column_config.NumberColumn(format="%.2f")
-        }
+        df_final, hide_index=True, use_container_width=True,
+        column_config={"漲幅%": st.column_config.NumberColumn(format="%.2f %%"), "成交": st.column_config.NumberColumn(format="%.2f"), "漲跌": st.column_config.NumberColumn(format="%.2f")}
     )
 
     # --- 下半部 K 線圖 ---
@@ -163,20 +175,14 @@ if final_rows:
             df_k['MA20'] = df_k['Close'].rolling(20).mean()
             df_k['MA60'] = df_k['Close'].rolling(60).mean()
             
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.8],
-                                subplot_titles=(f'{t_name} ({t_code}) 日K與均線', '成交量'))
-            
-            fig.add_trace(go.Candlestick(x=df_k.index, open=df_k['Open'], high=df_k['High'], 
-                                         low=df_k['Low'], close=df_k['Close'], name='K線'), row=1, col=1)
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_width=[0.2, 0.8], subplot_titles=(f'{t_name} ({t_code}) 日K與均線', '成交量'))
+            fig.add_trace(go.Candlestick(x=df_k.index, open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name='K線'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA5'], mode='lines', line=dict(color='purple'), name='MA5'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA20'], mode='lines', line=dict(color='orange'), name='MA20'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA60'], mode='lines', line=dict(color='blue'), name='MA60'), row=1, col=1)
-            
             v_colors = ['red' if c >= o else 'green' for c, o in zip(df_k['Close'], df_k['Open'])]
             fig.add_trace(go.Bar(x=df_k.index, y=df_k['Volume'], marker_color=v_colors, name='成交量'), row=2, col=1)
-            
-            fig.update_layout(xaxis_rangeslider_visible=False, height=650, dragmode='drawline', 
-                              newshape=dict(line_color='black', line_width=2))
+            fig.update_layout(xaxis_rangeslider_visible=False, height=650, dragmode='drawline', newshape=dict(line_color='black', line_width=2))
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
