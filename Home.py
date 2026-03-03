@@ -65,20 +65,21 @@ def fetch_market_data(date_str, roc_date_str):
     return None
 
 def plot_kline(ticker, name):
-    """繪製帶有均線與趨勢線畫筆功能的 K 線圖"""
-    # 判斷上市或上櫃後綴
-    # 這裡做個簡單防呆，若是00開頭通常是上市 .TW，其他先試 .TW 若沒資料再試 .TWO
-    suffix = ".TW"
-    df = yf.download(f"{ticker}{suffix}", period="6mo", auto_adjust=True, progress=False)
+    """繪製帶有均線與趨勢線畫筆功能的 K 線圖 (使用穩定版 API)"""
+    
+    # 使用 yf.Ticker() 避免 MultiIndex 報錯問題
+    stock = yf.Ticker(f"{ticker}.TW")
+    df = stock.history(period="6mo")
+    
     if df.empty:
-        suffix = ".TWO"
-        df = yf.download(f"{ticker}{suffix}", period="6mo", auto_adjust=True, progress=False)
+        stock = yf.Ticker(f"{ticker}.TWO")
+        df = stock.history(period="6mo")
         
     if df.empty:
-        st.warning(f"無法取得 {name} ({ticker}) 的歷史股價資料。")
+        st.warning(f"⚠️ 無法取得 {name} ({ticker}) 的歷史股價資料，請稍後再試。")
         return
 
-    # 計算均線
+    # 確保資料格式正確並計算均線
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['MA60'] = df['Close'].rolling(window=60).mean()
 
@@ -105,7 +106,6 @@ def plot_kline(ticker, name):
         xaxis_rangeslider_visible=False,
         height=650,
         margin=dict(l=20, r=20, t=40, b=20),
-        # 啟動 Plotly 畫筆工具：讓使用者可以自己畫線！
         dragmode='drawline',
         newshape=dict(line_color='yellow', line_width=2, opacity=1)
     )
@@ -113,7 +113,7 @@ def plot_kline(ticker, name):
     # 隱藏下方子圖的 rangeslider
     fig.update_xaxes(rangeslider_visible=False, rangebreaks=[dict(bounds=["sat", "mon"])])
 
-    # 顯示圖表，並在工具列加入畫線與橡皮擦按鈕
+    # 顯示圖表
     st.plotly_chart(fig, use_container_width=True, config={
         'modeBarButtonsToAdd': ['drawline', 'eraseshape'],
         'displaylogo': False
@@ -153,6 +153,10 @@ df_my_stocks = pd.DataFrame()
 if df_all is not None:
     df_all['商品'] = df_all['商品'].str.strip()
     df_all['代碼'] = df_all['代碼'].str.strip()
+    
+    # 🌟 關鍵修正：直接排除所有長度 >= 6 碼的權證、牛熊證
+    df_all = df_all[df_all['代碼'].str.len() < 6].copy()
+    
     df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
     df_all['成交量_張'] = df_all['成交量_股'] // 1000
     df_all['成交'] = df_all['成交'].apply(convert_to_float)
@@ -187,15 +191,13 @@ else:
 # --- 下半部：K 線與趨勢線繪圖區 ---
 st.divider()
 st.subheader("📈 互動式 K 線與趨勢線分析")
-st.markdown("💡 **操作秘訣**：把滑鼠移到圖表右上角的工具列，點選「✏️ **Draw line**」，即可在圖表上拖曳畫出專屬的支撐線或壓力線！點擊「🧹 **Erase active shape**」即可擦除。")
+st.markdown("💡 **操作秘訣**：把滑鼠移到圖表右上角的工具列，點選「✏️ **Draw line**」，即可在圖表上拖曳畫出專屬的支撐線或壓力線！")
 
 if not df_my_stocks.empty:
-    # 建立選單讓使用者挑選要看哪一檔股票的圖表
     stock_options = [f"{row['代碼']} {row['商品']}" for _, row in df_display.iterrows()]
     selected_stock = st.selectbox("選擇要查看圖表的股票：", stock_options)
     
     if selected_stock:
-        # 拆解出純代號與名稱
         target_ticker = selected_stock.split()[0]
         target_name = selected_stock.split()[1]
         
