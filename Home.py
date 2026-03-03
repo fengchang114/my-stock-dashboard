@@ -4,7 +4,6 @@ import requests
 import datetime
 import urllib3
 import re
-import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -33,12 +32,11 @@ def fetch_market_data(date_str, roc_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
     
-    # 抓取上市 (TWSE)
+    # 上市
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
-            # 【關鍵修正1】精確定位包含所有必要欄位的表格，避免被證交所新增的統計表干擾
             req_cols = {'證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數'}
             target_table = next((t for t in res.get('tables', []) if req_cols.issubset(set(t.get('fields', [])))), None)
             
@@ -56,7 +54,7 @@ def fetch_market_data(date_str, roc_date_str):
                 df_list.append(df[['代碼', '商品', '成交', '漲跌', '成交量_股']])
     except: pass
 
-    # 抓取上櫃 (TPEx)
+    # 上櫃
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
@@ -70,13 +68,43 @@ def fetch_market_data(date_str, roc_date_str):
     if df_list: return pd.concat(df_list, ignore_index=True)
     return None
 
-def plot_kline(ticker, name):
-    stock = yf.Ticker(f"{ticker}.TW")
-    df = stock.history(period="6mo")
+@st.cache_data(ttl=3600)
+def fetch_kline_data(ticker):
+    """🌟 繞過 yfinance 限流封鎖，直接呼叫 Yahoo Public API 獲取 K 線資料"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
-    if df.empty:
-        stock = yf.Ticker(f"{ticker}.TWO")
-        df = stock.history(period="6mo")
+    # 輪流測試上市(.TW)與上櫃(.TWO)
+    for suffix in ['.TW', '.TWO']:
+        try:
+            url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
+            res = requests.get(url, headers=headers, timeout=5)
+            data = res.json()
+            result = data.get('chart', {}).get('result')
+            
+            if result:
+                timestamps = result[0]['timestamp']
+                quote = result[0]['indicators']['quote'][0]
+                df = pd.DataFrame({
+                    'Open': quote['open'],
+                    'High': quote['high'],
+                    'Low': quote['low'],
+                    'Close': quote['close'],
+                    'Volume': quote['volume']
+                })
+                # 轉換為台灣時間並對齊日期
+                df.index = pd.to_datetime(timestamps, unit='s') + pd.Timedelta(hours=8)
+                df.index = df.index.normalize()
+                df = df.dropna()
+                
+                if not df.empty:
+                    return df
+        except:
+            continue
+            
+    return pd.DataFrame()
+
+def plot_kline(ticker, name):
+    df = fetch_kline_data(ticker)
         
     if df.empty:
         st.warning(f"⚠️ 無法取得 {name} ({ticker}) 的歷史股價資料，請稍後再試。")
@@ -147,7 +175,7 @@ if df_all is not None:
     df_all['商品'] = df_all['商品'].str.strip()
     df_all['代碼'] = df_all['代碼'].str.strip()
     
-    # 【關鍵修正2】排除長度 >= 6 碼的權證，但「豁免」使用者手動輸入的代碼 (保護 009816 不被刪除)
+    # 排除長度 >= 6 碼的權證，但「豁免」使用者手動輸入的代碼 (保護 009816)
     cond_length = df_all['代碼'].str.len() < 6
     cond_user_explicit = df_all['代碼'].isin(my_codes)
     df_all = df_all[cond_length | cond_user_explicit].copy()
@@ -185,7 +213,9 @@ else:
 
 st.divider()
 st.subheader("📈 互動式 K 線與趨勢線分析")
-st.markdown("💡 **操作秘訣**：把滑鼠移到圖表右上角的工具列，點選「✏️ **Draw line**」，即可在圖表上拖曳畫出專屬的支撐線或壓力線！")
+st.markdown("💡 **操作秘訣**：\n"
+            "1. **畫線**：點選右上角的「✏️ **Draw line**」，在圖表上拖曳。\n"
+            "2. **刪除**：點選右上角的「🧹 **Erase active shape**」，然後點擊您畫的線即可清除！")
 
 if not df_my_stocks.empty:
     stock_options = [f"{row['代碼']} {row['商品']}" for _, row in df_display.iterrows()]
