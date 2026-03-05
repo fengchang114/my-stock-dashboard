@@ -18,14 +18,12 @@ HOLDINGS_FILE = "my_holdings.txt"
 DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 009816"
 
 def load_holdings():
-    """讀取存檔的持股清單"""
     if os.path.exists(HOLDINGS_FILE):
         with open(HOLDINGS_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
     return DEFAULT_HOLDINGS
 
 def save_holdings(holdings_str):
-    """將持股清單存入檔案"""
     with open(HOLDINGS_FILE, "w", encoding="utf-8") as f:
         f.write(holdings_str)
 
@@ -92,7 +90,6 @@ def fetch_market_data(date_str, roc_date_str):
 st.title("🏠 我的投資儀表板")
 st.divider()
 
-# 讀取存檔的持股
 current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
@@ -108,7 +105,6 @@ if save_btn:
     save_holdings(user_stocks_input)
     st.success("✅ 持股清單已成功存檔！下次開啟將自動讀取。")
 
-# 解析輸入
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
 user_name_map = {}
@@ -130,6 +126,7 @@ with st.spinner('同步官方名稱與精準行情中...'):
         api_name_map = dict(zip(df_all['代碼'], df_all['商品']))
 
     final_rows = []
+    # 這裡的 my_codes 已經是您輸入的順序了
     for code in my_codes:
         name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
         df_k = fetch_kline_data(code)
@@ -155,7 +152,9 @@ with st.spinner('同步官方名稱與精準行情中...'):
 
 # --- 顯示持股表格 ---
 if final_rows:
-    df_final = pd.DataFrame(final_rows).sort_values(by='漲幅%', ascending=False)
+    # 🌟 關鍵修正：移除了 .sort_values()，讓表格完全依照 final_rows (也就是您的輸入順序) 來顯示
+    df_final = pd.DataFrame(final_rows)
+    
     st.subheader(f"💡 {selected_date} 持股表現")
     st.dataframe(
         df_final, hide_index=True, use_container_width=True,
