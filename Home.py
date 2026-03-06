@@ -15,7 +15,7 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 # 迷你資料庫：存取持股清單
 # ==========================================
 HOLDINGS_FILE = "my_holdings.txt"
-DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 009816"
+DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 009816"
 
 def load_holdings():
     if os.path.exists(HOLDINGS_FILE):
@@ -58,19 +58,23 @@ def fetch_kline_data(ticker):
 def fetch_market_data(date_str, roc_date_str):
     headers = {'User-Agent': 'Mozilla/5.0'}
     df_list = []
+    
+    # 上市 (TWSE)
     try:
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
+            # 🌟 關鍵修正：將所有包含「收盤價」與「證券代號」的表格全部收集起來，確保不漏掉 ETF 表格
             valid_tables = [t for t in res.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])]
-            if valid_tables:
-                target = max(valid_tables, key=lambda x: len(x.get('data', [])))
+            for target in valid_tables:
                 df = pd.DataFrame(target['data'], columns=target['fields'])
                 df_clean = pd.DataFrame()
                 df_clean['代碼'] = df.iloc[:, 0].str.strip()
                 df_clean['商品'] = df.iloc[:, 1].str.strip()
                 df_list.append(df_clean)
     except: pass
+    
+    # 上櫃 (TPEx)
     try:
         url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
         res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
@@ -82,6 +86,7 @@ def fetch_market_data(date_str, roc_date_str):
             df_clean['商品'] = df.iloc[:, 1].str.strip()
             df_list.append(df_clean)
     except: pass
+    
     return pd.concat(df_list, ignore_index=True) if df_list else None
 
 # ==========================================
@@ -123,10 +128,11 @@ with st.spinner('同步官方名稱與精準行情中...'):
     df_all = fetch_market_data(selected_date.strftime('%Y%m%d'), f"{selected_date.year-1911}/{selected_date.strftime('%m/%d')}")
     api_name_map = {}
     if df_all is not None and not df_all.empty:
+        # 移除重複代碼，確保名稱字典乾淨
+        df_all = df_all.drop_duplicates(subset=['代碼'], keep='last')
         api_name_map = dict(zip(df_all['代碼'], df_all['商品']))
 
     final_rows = []
-    # 這裡的 my_codes 已經是您輸入的順序了
     for code in my_codes:
         name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
         df_k = fetch_kline_data(code)
@@ -144,21 +150,33 @@ with st.spinner('同步官方名稱與精準行情中...'):
                 change = price - yest_close
                 pct = (change / yest_close) * 100
                 
+                # 🌟 新增開、高、低欄位
                 final_rows.append({
                     '代碼': code, '商品': name,
-                    '成交': round(price, 2), '漲跌': round(change, 2), '漲幅%': round(pct, 2),
+                    '開盤': round(float(k_today['Open']), 2),
+                    '最高': round(float(k_today['High']), 2),
+                    '最低': round(float(k_today['Low']), 2),
+                    '收盤': round(price, 2), 
+                    '漲跌': round(change, 2), 
+                    '漲幅%': round(pct, 2),
                     '成交量(張)': int(k_today['Volume'] / 1000)
                 })
 
 # --- 顯示持股表格 ---
 if final_rows:
-    # 🌟 關鍵修正：移除了 .sort_values()，讓表格完全依照 final_rows (也就是您的輸入順序) 來顯示
     df_final = pd.DataFrame(final_rows)
     
     st.subheader(f"💡 {selected_date} 持股表現")
     st.dataframe(
         df_final, hide_index=True, use_container_width=True,
-        column_config={"漲幅%": st.column_config.NumberColumn(format="%.2f %%"), "成交": st.column_config.NumberColumn(format="%.2f"), "漲跌": st.column_config.NumberColumn(format="%.2f")}
+        column_config={
+            "開盤": st.column_config.NumberColumn(format="%.2f"),
+            "最高": st.column_config.NumberColumn(format="%.2f"),
+            "最低": st.column_config.NumberColumn(format="%.2f"),
+            "收盤": st.column_config.NumberColumn(format="%.2f"),
+            "漲跌": st.column_config.NumberColumn(format="%.2f"),
+            "漲幅%": st.column_config.NumberColumn(format="%.2f %%")
+        }
     )
 
     # --- 下半部 K 線圖 ---
