@@ -12,10 +12,19 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
 
 # ==========================================
-# 迷你資料庫：存取持股清單
+# 迷你資料庫與內建字典
 # ==========================================
 HOLDINGS_FILE = "my_holdings.txt"
-DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 009816"
+# 預設字串就把名稱補齊，發揮示範作用
+DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050 元大台灣50, 009816 台積電購"
+
+# 🌟 內建國民 ETF 字典，對付政府 API 不給 ETF 名稱的痛點
+COMMON_ETF_MAP = {
+    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
+    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年",
+    "00632R": "元大台灣50反1", "00631L": "元大台灣50正2"
+}
 
 def load_holdings():
     if os.path.exists(HOLDINGS_FILE):
@@ -28,7 +37,7 @@ def save_holdings(holdings_str):
         f.write(holdings_str)
 
 # ==========================================
-# 工具與抓取函式 (混血架構升級版)
+# 工具與抓取函式 (雲端特化版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
@@ -53,7 +62,7 @@ def fetch_kline_data(ticker):
                 df.index = df.index.normalize()
                 df = df.dropna()
                 
-                # 🌟 Yahoo ETF Bug 終極殺手鐧：如果歷史成交量回傳 0，就從即時資料(meta)把真實成交量挖出來補上！
+                # Yahoo 修正機制：挖出真實成交量
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0:
@@ -69,9 +78,9 @@ def fetch_openapi_names_and_volumes():
     vol_map = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 🌟 延長 Timeout 到 20 秒，確保雲端主機有足夠時間載完政府的巨型名冊
     try:
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=20).json()
+        # 上市一般股票 (不含 ETF 與權證)
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10).json()
         for row in res:
             code = str(row.get('Code', '')).strip()
             name_map[code] = str(row.get('Name', '')).strip()
@@ -80,7 +89,8 @@ def fetch_openapi_names_and_volumes():
     except: pass
 
     try:
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=20).json()
+        # 上櫃股票
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=10).json()
         for row in res:
             code = str(row.get('SecuritiesCompanyCode', '')).strip()
             name_map[code] = str(row.get('CompanyName', '')).strip()
@@ -93,14 +103,14 @@ def fetch_openapi_names_and_volumes():
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板 (雲端終極除錯版)")
+st.title("🏠 我的投資儀表板 (終極雲端版)")
 st.divider()
 
 current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    user_stocks_input = st.text_input("📝 持股清單：", value=current_saved_holdings)
+    user_stocks_input = st.text_input("📝 持股清單 (建議加上名稱以利記憶)：", value=current_saved_holdings)
 with col2:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 with col3:
@@ -108,32 +118,35 @@ with col3:
     save_btn = st.button("💾 儲存為預設", use_container_width=True)
 
 if selected_date.weekday() >= 5:
-    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動為您顯示最近一個交易日的資料。")
+    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
 
 if save_btn:
     save_holdings(user_stocks_input)
-    st.success("✅ 持股清單已成功存檔！(本機永久有效，雲端暫存有效)")
+    st.success("✅ 持股清單已成功存檔！")
 
+# 解析輸入，萃取代碼與自訂名稱
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
 user_name_map = {}
 for p in pairs:
-    c_match = re.search(r'\d{4,6}', p)
+    c_match = re.search(r'\d{4,6}[A-Za-z]?', p) # 支援像 00679B 這種帶英文字母的代碼
     if c_match:
         code = c_match.group()
         my_codes.append(code)
+        # 移除代碼後，剩下的當作自訂名稱
         name_part = p.replace(code, '').strip()
         if name_part:
             user_name_map[code] = name_part
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('同步政府開放資料庫與精準歷史行情中 (雲端首次載入需時較長)...'):
+with st.spinner('同步官方資料與精準行情中...'):
     api_name_map, api_vol_map = fetch_openapi_names_and_volumes()
 
     final_rows = []
     for code in my_codes:
-        name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
+        # 🌟 命名最高原則：您輸入的自訂名稱 > 內建 ETF 字典 > 政府官方字典 > 只顯示代碼
+        name = user_name_map.get(code) or COMMON_ETF_MAP.get(code) or api_name_map.get(code, f"({code})")
         
         df_k = fetch_kline_data(code)
         if not df_k.empty:
@@ -203,8 +216,3 @@ if final_rows:
             fig.update_layout(xaxis_rangeslider_visible=False, height=650, dragmode='drawline', newshape=dict(line_color='black', line_width=2))
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
-else:
-    if selected_date.weekday() < 5:
-        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
-    else:
-        st.info("💡 週末查無官方資料，請點選上方日期切換至最近的交易日。")
