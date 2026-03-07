@@ -30,6 +30,14 @@ def save_holdings(holdings_str):
 # ==========================================
 # 工具與抓取函式
 # ==========================================
+def convert_to_float(val):
+    try:
+        # 移除可能夾帶的 HTML 標籤 (如紅綠色碼)
+        val_str = re.sub(r'<[^>]+>', '', str(val)).strip()
+        if val_str in ['-', '', 'nan', 'None', '---', '除息', '除權', 'X']: return 0.0
+        return float(val_str.replace(',', ''))
+    except: return 0.0
+
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -64,13 +72,38 @@ def fetch_market_data(date_str, roc_date_str):
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
-            # 🌟 關鍵修正：將所有包含「收盤價」與「證券代號」的表格全部收集起來，確保不漏掉 ETF 表格
+            # 🌟 找尋所有包含代號與收盤價的表，一次網羅股票、ETF與權證
             valid_tables = [t for t in res.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])]
             for target in valid_tables:
+                title = target.get('title', '')
+                # 剔除政府公債與公司債
+                if '公債' in title or '債券' in title: continue
+                
                 df = pd.DataFrame(target['data'], columns=target['fields'])
+                sign_col = next((c for c in target['fields'] if '漲跌' in c and '價差' not in c), '漲跌(+/-)')
+                
+                if not set(['證券代號', '證券名稱', '收盤價', '成交股數']).issubset(df.columns): continue
+                
                 df_clean = pd.DataFrame()
-                df_clean['代碼'] = df.iloc[:, 0].str.strip()
-                df_clean['商品'] = df.iloc[:, 1].str.strip()
+                df_clean['代碼'] = df['證券代號'].str.strip()
+                df_clean['商品'] = df['證券名稱'].str.strip()
+                df_clean['收盤'] = df['收盤價'].apply(convert_to_float)
+                df_clean['成交量_股'] = df['成交股數'].apply(convert_to_float)
+                
+                # 安全獲取開高低，避免某些特殊表單缺欄位
+                df_clean['開盤'] = df['開盤價'].apply(convert_to_float) if '開盤價' in df.columns else df_clean['收盤']
+                df_clean['最高'] = df['最高價'].apply(convert_to_float) if '最高價' in df.columns else df_clean['收盤']
+                df_clean['最低'] = df['最低價'].apply(convert_to_float) if '最低價' in df.columns else df_clean['收盤']
+                
+                if sign_col in df.columns and '漲跌價差' in df.columns:
+                    def get_change(r):
+                        sign = str(r[sign_col]).lower()
+                        val = convert_to_float(r['漲跌價差'])
+                        if 'green' in sign or '-' in sign: return -val
+                        return val
+                    df_clean['漲跌'] = df.apply(get_change, axis=1)
+                else: df_clean['漲跌'] = 0.0
+                
                 df_list.append(df_clean)
     except: pass
     
@@ -81,13 +114,20 @@ def fetch_market_data(date_str, roc_date_str):
         raw = res.get('aaData') or (res.get('tables', [{}])[0].get('data', []) if res.get('tables') else [])
         if raw:
             df = pd.DataFrame(raw)
-            df_clean = pd.DataFrame()
-            df_clean['代碼'] = df.iloc[:, 0].str.strip()
-            df_clean['商品'] = df.iloc[:, 1].str.strip()
-            df_list.append(df_clean)
+            if len(df.columns) >= 9:
+                df_clean = pd.DataFrame()
+                df_clean['代碼'] = df.iloc[:, 0].str.strip()
+                df_clean['商品'] = df.iloc[:, 1].str.strip()
+                df_clean['收盤'] = df.iloc[:, 2].apply(convert_to_float)
+                df_clean['漲跌'] = df.iloc[:, 3].apply(convert_to_float)
+                df_clean['開盤'] = df.iloc[:, 4].apply(convert_to_float)
+                df_clean['最高'] = df.iloc[:, 5].apply(convert_to_float)
+                df_clean['最低'] = df.iloc[:, 6].apply(convert_to_float)
+                df_clean['成交量_股'] = df.iloc[:, 8].apply(convert_to_float)
+                df_list.append(df_clean)
     except: pass
     
-    return pd.concat(df_list, ignore_index=True) if df_list else None
+    return pd.concat(df_list, ignore_index=True).drop_duplicates(subset=['代碼'], keep='last') if df_list else None
 
 # ==========================================
 # 介面與核心邏輯
@@ -126,41 +166,50 @@ target_ts = pd.Timestamp(selected_date).normalize()
 
 with st.spinner('同步官方名稱與精準行情中...'):
     df_all = fetch_market_data(selected_date.strftime('%Y%m%d'), f"{selected_date.year-1911}/{selected_date.strftime('%m/%d')}")
-    api_name_map = {}
-    if df_all is not None and not df_all.empty:
-        # 移除重複代碼，確保名稱字典乾淨
-        df_all = df_all.drop_duplicates(subset=['代碼'], keep='last')
-        api_name_map = dict(zip(df_all['代碼'], df_all['商品']))
 
     final_rows = []
     for code in my_codes:
-        name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
-        df_k = fetch_kline_data(code)
-        if not df_k.empty:
-            if target_ts in df_k.index:
-                k_today = df_k.loc[target_ts]
-                past_data = df_k[df_k.index < target_ts]
-            else:
-                k_today = df_k.iloc[-1]
-                past_data = df_k.iloc[:-1]
+        # 🌟 優先使用官方盤後資料 (解決 Yahoo 的 ETF 成交量為 0 Bug)
+        if df_all is not None and code in df_all['代碼'].values:
+            row = df_all[df_all['代碼'] == code].iloc[0]
+            name = row['商品'] if row['商品'] else user_name_map.get(code, f"({code})")
+            open_p, high_p, low_p, close_p = row['開盤'], row['最高'], row['最低'], row['收盤']
+            change_p = row['漲跌']
+            vol = int(row['成交量_股'] // 1000)
             
-            if not past_data.empty:
-                yest_close = past_data.iloc[-1]['Close']
-                price = float(k_today['Close'])
-                change = price - yest_close
-                pct = (change / yest_close) * 100
+            prev_close = close_p - change_p
+            pct = round((change_p / prev_close) * 100, 2) if prev_close > 0 else 0.0
+            
+            final_rows.append({
+                '代碼': code, '商品': name,
+                '開盤': open_p, '最高': high_p, '最低': low_p, '收盤': close_p, 
+                '漲跌': change_p, '漲幅%': pct, '成交量(張)': vol
+            })
+        else:
+            # 如果是今日盤中或官方查無資料，才啟用 Yahoo 備援
+            name = user_name_map.get(code, f"({code})")
+            df_k = fetch_kline_data(code)
+            if not df_k.empty:
+                if target_ts in df_k.index:
+                    k_today = df_k.loc[target_ts]
+                    past_data = df_k[df_k.index < target_ts]
+                else:
+                    k_today = df_k.iloc[-1]
+                    past_data = df_k.iloc[:-1]
                 
-                # 🌟 新增開、高、低欄位
-                final_rows.append({
-                    '代碼': code, '商品': name,
-                    '開盤': round(float(k_today['Open']), 2),
-                    '最高': round(float(k_today['High']), 2),
-                    '最低': round(float(k_today['Low']), 2),
-                    '收盤': round(price, 2), 
-                    '漲跌': round(change, 2), 
-                    '漲幅%': round(pct, 2),
-                    '成交量(張)': int(k_today['Volume'] / 1000)
-                })
+                if not past_data.empty:
+                    yest_close = past_data.iloc[-1]['Close']
+                    price = float(k_today['Close'])
+                    change = price - yest_close
+                    pct = (change / yest_close) * 100
+                    
+                    final_rows.append({
+                        '代碼': code, '商品': name,
+                        '開盤': round(float(k_today['Open']), 2), '最高': round(float(k_today['High']), 2),
+                        '最低': round(float(k_today['Low']), 2), '收盤': round(price, 2), 
+                        '漲跌': round(change, 2), '漲幅%': round(pct, 2),
+                        '成交量(張)': int(k_today['Volume'] / 1000)
+                    })
 
 # --- 顯示持股表格 ---
 if final_rows:
@@ -175,7 +224,8 @@ if final_rows:
             "最低": st.column_config.NumberColumn(format="%.2f"),
             "收盤": st.column_config.NumberColumn(format="%.2f"),
             "漲跌": st.column_config.NumberColumn(format="%.2f"),
-            "漲幅%": st.column_config.NumberColumn(format="%.2f %%")
+            "漲幅%": st.column_config.NumberColumn(format="%.2f %%"),
+            "成交量(張)": st.column_config.NumberColumn(format="%d")
         }
     )
 
