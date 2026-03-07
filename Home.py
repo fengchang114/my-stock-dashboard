@@ -28,17 +28,11 @@ def save_holdings(holdings_str):
         f.write(holdings_str)
 
 # ==========================================
-# 工具與抓取函式
+# 工具與抓取函式 (混血架構)
 # ==========================================
-def convert_to_float(val):
-    try:
-        val_str = re.sub(r'<[^>]+>', '', str(val)).strip()
-        if val_str in ['-', '', 'nan', 'None', '---', '除息', '除權', 'X']: return 0.0
-        return float(val_str.replace(',', ''))
-    except: return 0.0
-
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
+    """【主力部隊】抓取 Yahoo Finance 歷史資料 (不擋 IP，支援歷史日期)"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     for suffix in ['.TW', '.TWO']:
         try:
@@ -62,72 +56,38 @@ def fetch_kline_data(ticker):
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
-def fetch_market_data(date_str, roc_date_str):
+def fetch_openapi_names_and_volumes():
+    """【輔助部隊】抓取政府 OpenAPI 取得全市場名稱與最新成交量 (保證雲端暢通)"""
+    name_map = {}
+    vol_map = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
-    df_list = []
-    
-    # 上市 (TWSE)
+
+    # 1. 上市 (TWSE) - 包含一般股票與 ETF
     try:
-        url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
-        res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
-        if res.get('stat') == 'OK':
-            valid_tables = [t for t in res.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])]
-            for target in valid_tables:
-                title = target.get('title', '')
-                if '公債' in title or '債券' in title: continue
-                
-                df = pd.DataFrame(target['data'], columns=target['fields'])
-                sign_col = next((c for c in target['fields'] if '漲跌' in c and '價差' not in c), '漲跌(+/-)')
-                
-                if not set(['證券代號', '證券名稱', '收盤價', '成交股數']).issubset(df.columns): continue
-                
-                df_clean = pd.DataFrame()
-                df_clean['代碼'] = df['證券代號'].str.strip()
-                df_clean['商品'] = df['證券名稱'].str.strip()
-                df_clean['收盤'] = df['收盤價'].apply(convert_to_float)
-                df_clean['成交量_股'] = df['成交股數'].apply(convert_to_float)
-                df_clean['開盤'] = df['開盤價'].apply(convert_to_float) if '開盤價' in df.columns else df_clean['收盤']
-                df_clean['最高'] = df['最高價'].apply(convert_to_float) if '最高價' in df.columns else df_clean['收盤']
-                df_clean['最低'] = df['最低價'].apply(convert_to_float) if '最低價' in df.columns else df_clean['收盤']
-                
-                if sign_col in df.columns and '漲跌價差' in df.columns:
-                    def get_change(r):
-                        sign = str(r[sign_col]).lower()
-                        val = convert_to_float(r['漲跌價差'])
-                        if 'green' in sign or '-' in sign: return -val
-                        return val
-                    df_clean['漲跌'] = df.apply(get_change, axis=1)
-                else: df_clean['漲跌'] = 0.0
-                
-                df_list.append(df_clean)
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5).json()
+        for row in res:
+            code = str(row.get('Code', '')).strip()
+            name_map[code] = str(row.get('Name', '')).strip()
+            try: vol_map[code] = int(row.get('TradeVolume', 0)) // 1000
+            except: pass
     except: pass
-    
-    # 上櫃 (TPEx)
+
+    # 2. 上櫃 (TPEx)
     try:
-        url_tpex = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc_date_str}"
-        res = requests.get(url_tpex, headers=headers, verify=False, timeout=10).json()
-        raw = res.get('aaData') or (res.get('tables', [{}])[0].get('data', []) if res.get('tables') else [])
-        if raw:
-            df = pd.DataFrame(raw)
-            if len(df.columns) >= 9:
-                df_clean = pd.DataFrame()
-                df_clean['代碼'] = df.iloc[:, 0].str.strip()
-                df_clean['商品'] = df.iloc[:, 1].str.strip()
-                df_clean['收盤'] = df.iloc[:, 2].apply(convert_to_float)
-                df_clean['漲跌'] = df.iloc[:, 3].apply(convert_to_float)
-                df_clean['開盤'] = df.iloc[:, 4].apply(convert_to_float)
-                df_clean['最高'] = df.iloc[:, 5].apply(convert_to_float)
-                df_clean['最低'] = df.iloc[:, 6].apply(convert_to_float)
-                df_clean['成交量_股'] = df.iloc[:, 8].apply(convert_to_float)
-                df_list.append(df_clean)
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=5).json()
+        for row in res:
+            code = str(row.get('SecuritiesCompanyCode', '')).strip()
+            name_map[code] = str(row.get('CompanyName', '')).strip()
+            try: vol_map[code] = int(row.get('TradingVolume', 0)) // 1000
+            except: pass
     except: pass
-    
-    return pd.concat(df_list, ignore_index=True).drop_duplicates(subset=['代碼'], keep='last') if df_list else None
+
+    return name_map, vol_map
 
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板")
+st.title("🏠 我的投資儀表板 (雲端暢通版)")
 st.divider()
 
 current_saved_holdings = load_holdings()
@@ -141,13 +101,13 @@ with col3:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     save_btn = st.button("💾 儲存為預設", use_container_width=True)
 
-# 🌟 新增：週末假日智慧警示
+# 週末假日智慧警示
 if selected_date.weekday() >= 5:
-    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，台股未開盤喔！請選擇其他交易日。")
+    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動為您顯示最近一個交易日的資料。")
 
 if save_btn:
     save_holdings(user_stocks_input)
-    st.success("✅ 持股清單已成功存檔！下次開啟將自動讀取。")
+    st.success("✅ 持股清單已成功存檔！(本機永久有效，雲端暫存有效)")
 
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
@@ -163,50 +123,43 @@ for p in pairs:
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('同步官方名稱與精準行情中...'):
-    df_all = fetch_market_data(selected_date.strftime('%Y%m%d'), f"{selected_date.year-1911}/{selected_date.strftime('%m/%d')}")
+with st.spinner('同步政府開放資料庫與精準歷史行情中...'):
+    # 呼叫 OpenAPI 取得名稱與成交量字典
+    api_name_map, api_vol_map = fetch_openapi_names_and_volumes()
 
     final_rows = []
     for code in my_codes:
-        if df_all is not None and code in df_all['代碼'].values:
-            row = df_all[df_all['代碼'] == code].iloc[0]
-            name = row['商品'] if row['商品'] else user_name_map.get(code, f"({code})")
-            open_p, high_p, low_p, close_p = row['開盤'], row['最高'], row['最低'], row['收盤']
-            change_p = row['漲跌']
-            vol = int(row['成交量_股'] // 1000)
+        # 🌟 命名最高指導原則：政府 OpenAPI > 您手動輸入 > 只顯示代碼
+        name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
+        
+        df_k = fetch_kline_data(code)
+        if not df_k.empty:
+            # 時光機邏輯：找指定的日期，如果那天沒開盤(如週末)，就找它之前最近的一天
+            if target_ts in df_k.index:
+                k_target = df_k.loc[target_ts]
+                past_data = df_k[df_k.index < target_ts]
+            else:
+                k_target = df_k.iloc[-1]
+                past_data = df_k.iloc[:-1]
             
-            prev_close = close_p - change_p
-            pct = round((change_p / prev_close) * 100, 2) if prev_close > 0 else 0.0
-            
-            final_rows.append({
-                '代碼': code, '商品': name,
-                '開盤': open_p, '最高': high_p, '最低': low_p, '收盤': close_p, 
-                '漲跌': change_p, '漲幅%': pct, '成交量(張)': vol
-            })
-        else:
-            name = user_name_map.get(code, f"({code})")
-            df_k = fetch_kline_data(code)
-            if not df_k.empty:
-                if target_ts in df_k.index:
-                    k_today = df_k.loc[target_ts]
-                    past_data = df_k[df_k.index < target_ts]
-                else:
-                    k_today = df_k.iloc[-1]
-                    past_data = df_k.iloc[:-1]
+            if not past_data.empty:
+                yest_close = past_data.iloc[-1]['Close']
+                price = float(k_target['Close'])
+                change = price - yest_close
+                pct = (change / yest_close) * 100
                 
-                if not past_data.empty:
-                    yest_close = past_data.iloc[-1]['Close']
-                    price = float(k_today['Close'])
-                    change = price - yest_close
-                    pct = (change / yest_close) * 100
-                    
-                    final_rows.append({
-                        '代碼': code, '商品': name,
-                        '開盤': round(float(k_today['Open']), 2), '最高': round(float(k_today['High']), 2),
-                        '最低': round(float(k_today['Low']), 2), '收盤': round(price, 2), 
-                        '漲跌': round(change, 2), '漲幅%': round(pct, 2),
-                        '成交量(張)': int(k_today['Volume'] / 1000)
-                    })
+                # 🌟 成交量修復機制：如果 Yahoo 傳回 0，且我們看的是最新資料，就去跟政府 OpenAPI 借資料！
+                vol = int(k_target['Volume'] / 1000)
+                if vol == 0 and code in api_vol_map:
+                    vol = api_vol_map[code]
+                
+                final_rows.append({
+                    '代碼': code, '商品': name,
+                    '開盤': round(float(k_target['Open']), 2), '最高': round(float(k_target['High']), 2),
+                    '最低': round(float(k_target['Low']), 2), '收盤': round(price, 2), 
+                    '漲跌': round(change, 2), '漲幅%': round(pct, 2),
+                    '成交量(張)': vol
+                })
 
 # --- 顯示持股表格 ---
 if final_rows:
@@ -250,8 +203,4 @@ if final_rows:
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
-    # 🌟 新增：針對平日無資料的溫馨提示
-    if selected_date.weekday() < 5:
-        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，官方盤後資料（下午 2:00 後）尚未產出。")
-    else:
-        st.info("💡 週末查無官方盤後資料，請點選上方日期切換至最近的交易日（例如星期五）。")
+    st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
