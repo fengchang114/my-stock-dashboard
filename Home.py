@@ -45,9 +45,14 @@ def save_name_cache(cache_dict):
 # 🌟 核心升級：讀取您上傳的本地官方名冊
 # ==========================================
 @st.cache_data(ttl=86400) # 字典一天讀一次就好，超省效能
+# ==========================================
+# 🌟 核心升級：同時讀取「上市」與「上櫃」本地官方名冊
+# ==========================================
+@st.cache_data(ttl=86400) # 字典一天讀一次就好，超省效能
 def load_local_official_dictionary():
     name_map = {}
-    # 檢查您上傳的 STOCK_DAY_ALL.json 是否存在
+    
+    # 1. 讀取上市字典 (STOCK_DAY_ALL.json)
     if os.path.exists("STOCK_DAY_ALL.json"):
         try:
             with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
@@ -58,7 +63,22 @@ def load_local_official_dictionary():
                     if code and name:
                         name_map[code] = name
         except Exception as e:
-            st.error(f"讀取本地字典失敗: {e}")
+            st.error(f"讀取上市本地字典失敗: {e}")
+
+    # 2. 讀取上櫃字典 (dlyquote.json)
+    if os.path.exists("dlyquote.json"):
+        try:
+            with open("dlyquote.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for row in data:
+                    # 注意：上櫃檔案的欄位名稱跟上市的不一樣！
+                    code = str(row.get('SecuritiesCompanyCode', '')).strip()
+                    name = str(row.get('CompanyName', '')).strip()
+                    if code and name:
+                        name_map[code] = name
+        except Exception as e:
+            st.error(f"讀取上櫃本地字典失敗: {e}")
+            
     return name_map
 
 # ==========================================
