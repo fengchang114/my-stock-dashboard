@@ -32,7 +32,6 @@ def save_holdings(holdings_str):
 # ==========================================
 def convert_to_float(val):
     try:
-        # 移除可能夾帶的 HTML 標籤 (如紅綠色碼)
         val_str = re.sub(r'<[^>]+>', '', str(val)).strip()
         if val_str in ['-', '', 'nan', 'None', '---', '除息', '除權', 'X']: return 0.0
         return float(val_str.replace(',', ''))
@@ -72,11 +71,9 @@ def fetch_market_data(date_str, roc_date_str):
         url_twse = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
         res = requests.get(url_twse, headers=headers, verify=False, timeout=10).json()
         if res.get('stat') == 'OK':
-            # 🌟 找尋所有包含代號與收盤價的表，一次網羅股票、ETF與權證
             valid_tables = [t for t in res.get('tables', []) if '收盤價' in t.get('fields', []) and '證券代號' in t.get('fields', [])]
             for target in valid_tables:
                 title = target.get('title', '')
-                # 剔除政府公債與公司債
                 if '公債' in title or '債券' in title: continue
                 
                 df = pd.DataFrame(target['data'], columns=target['fields'])
@@ -89,8 +86,6 @@ def fetch_market_data(date_str, roc_date_str):
                 df_clean['商品'] = df['證券名稱'].str.strip()
                 df_clean['收盤'] = df['收盤價'].apply(convert_to_float)
                 df_clean['成交量_股'] = df['成交股數'].apply(convert_to_float)
-                
-                # 安全獲取開高低，避免某些特殊表單缺欄位
                 df_clean['開盤'] = df['開盤價'].apply(convert_to_float) if '開盤價' in df.columns else df_clean['收盤']
                 df_clean['最高'] = df['最高價'].apply(convert_to_float) if '最高價' in df.columns else df_clean['收盤']
                 df_clean['最低'] = df['最低價'].apply(convert_to_float) if '最低價' in df.columns else df_clean['收盤']
@@ -146,6 +141,10 @@ with col3:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     save_btn = st.button("💾 儲存為預設", use_container_width=True)
 
+# 🌟 新增：週末假日智慧警示
+if selected_date.weekday() >= 5:
+    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，台股未開盤喔！請選擇其他交易日。")
+
 if save_btn:
     save_holdings(user_stocks_input)
     st.success("✅ 持股清單已成功存檔！下次開啟將自動讀取。")
@@ -169,7 +168,6 @@ with st.spinner('同步官方名稱與精準行情中...'):
 
     final_rows = []
     for code in my_codes:
-        # 🌟 優先使用官方盤後資料 (解決 Yahoo 的 ETF 成交量為 0 Bug)
         if df_all is not None and code in df_all['代碼'].values:
             row = df_all[df_all['代碼'] == code].iloc[0]
             name = row['商品'] if row['商品'] else user_name_map.get(code, f"({code})")
@@ -186,7 +184,6 @@ with st.spinner('同步官方名稱與精準行情中...'):
                 '漲跌': change_p, '漲幅%': pct, '成交量(張)': vol
             })
         else:
-            # 如果是今日盤中或官方查無資料，才啟用 Yahoo 備援
             name = user_name_map.get(code, f"({code})")
             df_k = fetch_kline_data(code)
             if not df_k.empty:
@@ -253,4 +250,8 @@ if final_rows:
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
-    st.info("請輸入持股代碼並點選日期以顯示報價。")
+    # 🌟 新增：針對平日無資料的溫馨提示
+    if selected_date.weekday() < 5:
+        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，官方盤後資料（下午 2:00 後）尚未產出。")
+    else:
+        st.info("💡 週末查無官方盤後資料，請點選上方日期切換至最近的交易日（例如星期五）。")
