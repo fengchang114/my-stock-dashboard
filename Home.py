@@ -28,11 +28,10 @@ def save_holdings(holdings_str):
         f.write(holdings_str)
 
 # ==========================================
-# 工具與抓取函式 (混血架構)
+# 工具與抓取函式 (混血架構升級版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
-    """【主力部隊】抓取 Yahoo Finance 歷史資料 (不擋 IP，支援歷史日期)"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     for suffix in ['.TW', '.TWO']:
         try:
@@ -41,6 +40,7 @@ def fetch_kline_data(ticker):
             data = res.json()
             result = data.get('chart', {}).get('result')
             if result:
+                meta = result[0].get('meta', {})
                 timestamps = result[0]['timestamp']
                 quote = result[0]['indicators']['quote'][0]
                 adj_close = result[0]['indicators']['adjclose'][0]['adjclose']
@@ -51,20 +51,27 @@ def fetch_kline_data(ticker):
                 })
                 df.index = pd.to_datetime(timestamps, unit='s') + pd.Timedelta(hours=8)
                 df.index = df.index.normalize()
-                return df.dropna()
+                df = df.dropna()
+                
+                # 🌟 Yahoo ETF Bug 終極殺手鐧：如果歷史成交量回傳 0，就從即時資料(meta)把真實成交量挖出來補上！
+                if not df.empty and df['Volume'].iloc[-1] == 0:
+                    reg_vol = meta.get('regularMarketVolume', 0)
+                    if reg_vol > 0:
+                        df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
+                        
+                return df
         except: continue
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def fetch_openapi_names_and_volumes():
-    """【輔助部隊】抓取政府 OpenAPI 取得全市場名稱與最新成交量 (保證雲端暢通)"""
     name_map = {}
     vol_map = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. 上市 (TWSE) - 包含一般股票與 ETF
+    # 🌟 延長 Timeout 到 20 秒，確保雲端主機有足夠時間載完政府的巨型名冊
     try:
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=5).json()
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=20).json()
         for row in res:
             code = str(row.get('Code', '')).strip()
             name_map[code] = str(row.get('Name', '')).strip()
@@ -72,9 +79,8 @@ def fetch_openapi_names_and_volumes():
             except: pass
     except: pass
 
-    # 2. 上櫃 (TPEx)
     try:
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=5).json()
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=20).json()
         for row in res:
             code = str(row.get('SecuritiesCompanyCode', '')).strip()
             name_map[code] = str(row.get('CompanyName', '')).strip()
@@ -87,7 +93,7 @@ def fetch_openapi_names_and_volumes():
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板 (雲端暢通版)")
+st.title("🏠 我的投資儀表板 (雲端終極除錯版)")
 st.divider()
 
 current_saved_holdings = load_holdings()
@@ -101,7 +107,6 @@ with col3:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     save_btn = st.button("💾 儲存為預設", use_container_width=True)
 
-# 週末假日智慧警示
 if selected_date.weekday() >= 5:
     st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動為您顯示最近一個交易日的資料。")
 
@@ -123,18 +128,15 @@ for p in pairs:
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('同步政府開放資料庫與精準歷史行情中...'):
-    # 呼叫 OpenAPI 取得名稱與成交量字典
+with st.spinner('同步政府開放資料庫與精準歷史行情中 (雲端首次載入需時較長)...'):
     api_name_map, api_vol_map = fetch_openapi_names_and_volumes()
 
     final_rows = []
     for code in my_codes:
-        # 🌟 命名最高指導原則：政府 OpenAPI > 您手動輸入 > 只顯示代碼
         name = api_name_map.get(code, user_name_map.get(code, f"({code})"))
         
         df_k = fetch_kline_data(code)
         if not df_k.empty:
-            # 時光機邏輯：找指定的日期，如果那天沒開盤(如週末)，就找它之前最近的一天
             if target_ts in df_k.index:
                 k_target = df_k.loc[target_ts]
                 past_data = df_k[df_k.index < target_ts]
@@ -148,7 +150,6 @@ with st.spinner('同步政府開放資料庫與精準歷史行情中...'):
                 change = price - yest_close
                 pct = (change / yest_close) * 100
                 
-                # 🌟 成交量修復機制：如果 Yahoo 傳回 0，且我們看的是最新資料，就去跟政府 OpenAPI 借資料！
                 vol = int(k_target['Volume'] / 1000)
                 if vol == 0 and code in api_vol_map:
                     vol = api_vol_map[code]
@@ -203,4 +204,7 @@ if final_rows:
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
-    st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
+    if selected_date.weekday() < 5:
+        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
+    else:
+        st.info("💡 週末查無官方資料，請點選上方日期切換至最近的交易日。")
