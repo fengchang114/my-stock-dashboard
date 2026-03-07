@@ -85,13 +85,15 @@ def fetch_kline_data(ticker):
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
+
 def fetch_openapi_names_and_volumes():
     name_map = {}
     vol_map = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
 
     try:
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10).json()
+        # 🌟 關鍵破解：加上 verify=False 繞過雲端主機對台灣政府 SSL 憑證的檢查
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=15, verify=False).json()
         for row in res:
             code = str(row.get('Code', '')).strip()
             name_map[code] = str(row.get('Name', '')).strip()
@@ -100,7 +102,8 @@ def fetch_openapi_names_and_volumes():
     except: pass
 
     try:
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=10).json()
+        # 🌟 同樣加上 verify=False
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=15, verify=False).json()
         for row in res:
             code = str(row.get('SecuritiesCompanyCode', '')).strip()
             name_map[code] = str(row.get('CompanyName', '')).strip()
@@ -237,3 +240,4 @@ if final_rows:
             fig.update_layout(xaxis_rangeslider_visible=False, height=650, dragmode='drawline', newshape=dict(line_color='black', line_width=2))
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
+
