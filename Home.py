@@ -13,17 +13,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
 
 # ==========================================
-# 迷你資料庫：存取持股與「商品名稱記憶庫」
+# 迷你資料庫：存取持股與動態記憶
 # ==========================================
 HOLDINGS_FILE = "my_holdings.txt"
-NAME_CACHE_FILE = "name_cache.json"  # 🌟 新增：專屬的記憶大腦
+NAME_CACHE_FILE = "name_cache.json" 
 DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 009816"
-
-COMMON_ETF_MAP = {
-    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
-    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
-    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
-}
 
 def load_holdings():
     if os.path.exists(HOLDINGS_FILE):
@@ -35,7 +29,6 @@ def save_holdings(holdings_str):
     with open(HOLDINGS_FILE, "w", encoding="utf-8") as f:
         f.write(holdings_str)
 
-# 🌟 記憶大腦的讀取與存檔功能
 def load_name_cache():
     if os.path.exists(NAME_CACHE_FILE):
         try:
@@ -49,7 +42,27 @@ def save_name_cache(cache_dict):
         json.dump(cache_dict, f, ensure_ascii=False, indent=2)
 
 # ==========================================
-# 工具與抓取函式
+# 🌟 核心升級：讀取您上傳的本地官方名冊
+# ==========================================
+@st.cache_data(ttl=86400) # 字典一天讀一次就好，超省效能
+def load_local_official_dictionary():
+    name_map = {}
+    # 檢查您上傳的 STOCK_DAY_ALL.json 是否存在
+    if os.path.exists("STOCK_DAY_ALL.json"):
+        try:
+            with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for row in data:
+                    code = str(row.get('Code', '')).strip()
+                    name = str(row.get('Name', '')).strip()
+                    if code and name:
+                        name_map[code] = name
+        except Exception as e:
+            st.error(f"讀取本地字典失敗: {e}")
+    return name_map
+
+# ==========================================
+# 工具與抓取函式 (Yahoo 報價引擎)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
@@ -74,7 +87,7 @@ def fetch_kline_data(ticker):
                 df.index = df.index.normalize()
                 df = df.dropna()
                 
-                # Yahoo 修正機制：挖出真實成交量 (修復 0050 成交量為 0 的 Bug)
+                # Yahoo 修正機制：挖出真實成交量 (修復 0050 等 ETF 成交量為 0 的 Bug)
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0:
@@ -84,46 +97,17 @@ def fetch_kline_data(ticker):
         except: continue
     return pd.DataFrame()
 
-@st.cache_data(ttl=3600)
-
-def fetch_openapi_names_and_volumes():
-    name_map = {}
-    vol_map = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-
-    try:
-        # 🌟 關鍵破解：加上 verify=False 繞過雲端主機對台灣政府 SSL 憑證的檢查
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=15, verify=False).json()
-        for row in res:
-            code = str(row.get('Code', '')).strip()
-            name_map[code] = str(row.get('Name', '')).strip()
-            try: vol_map[code] = int(row.get('TradeVolume', 0)) // 1000
-            except: pass
-    except: pass
-
-    try:
-        # 🌟 同樣加上 verify=False
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=15, verify=False).json()
-        for row in res:
-            code = str(row.get('SecuritiesCompanyCode', '')).strip()
-            name_map[code] = str(row.get('CompanyName', '')).strip()
-            try: vol_map[code] = int(row.get('TradingVolume', 0)) // 1000
-            except: pass
-    except: pass
-
-    return name_map, vol_map
-
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板 (終極記憶版)")
+st.title("🏠 我的投資儀表板 (本地字典全解鎖版)")
 st.divider()
 
 current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    user_stocks_input = st.text_input("📝 持股清單 (輸入過一次名稱就會永久記憶)：", value=current_saved_holdings)
+    user_stocks_input = st.text_input("📝 持股清單：", value=current_saved_holdings)
 with col2:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 with col3:
@@ -137,11 +121,11 @@ if save_btn:
     save_holdings(user_stocks_input)
     st.success("✅ 持股清單已成功存檔！")
 
-# 🌟 載入記憶大腦
+# 🌟 載入雙重大腦：本地官方名冊 + 您的動態記憶
+official_name_map = load_local_official_dictionary()
 name_cache = load_name_cache()
 cache_updated = False
 
-# 解析輸入
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
 
@@ -151,26 +135,21 @@ for p in pairs:
         code = c_match.group()
         my_codes.append(code)
         
-        # 看看代碼後面有沒有跟著文字
         name_part = p.replace(code, '').strip()
         if name_part:
-            # 如果有輸入名字，就寫入記憶大腦
             name_cache[code] = name_part
             cache_updated = True
 
-# 如果大腦有學到新單字，就存檔下來
 if cache_updated:
     save_name_cache(name_cache)
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('同步官方資料庫與精準歷史行情中...'):
-    api_name_map, api_vol_map = fetch_openapi_names_and_volumes()
-
+with st.spinner('從本地字典庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
-        # 🌟 找名字的最強順序：記憶大腦 > 內建 ETF 字典 > 政府官方 API > 殘酷的只顯示代碼
-        name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or api_name_map.get(code, f"({code})")
+        # 🌟 找名字的黃金順序：動態記憶大腦 > 本地官方 STOCK_DAY_ALL 字典 > 只顯示代碼
+        name = name_cache.get(code) or official_name_map.get(code) or f"({code})"
         
         df_k = fetch_kline_data(code)
         if not df_k.empty:
@@ -186,10 +165,7 @@ with st.spinner('同步官方資料庫與精準歷史行情中...'):
                 price = float(k_target['Close'])
                 change = price - yest_close
                 pct = (change / yest_close) * 100
-                
                 vol = int(k_target['Volume'] / 1000)
-                if vol == 0 and code in api_vol_map:
-                    vol = api_vol_map[code]
                 
                 final_rows.append({
                     '代碼': code, '商品': name,
@@ -240,4 +216,8 @@ if final_rows:
             fig.update_layout(xaxis_rangeslider_visible=False, height=650, dragmode='drawline', newshape=dict(line_color='black', line_width=2))
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
-
+else:
+    if selected_date.weekday() < 5:
+        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
+    else:
+        st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
