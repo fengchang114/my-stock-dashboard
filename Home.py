@@ -5,6 +5,7 @@ import datetime
 import urllib3
 import re
 import os
+import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -12,18 +13,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
 
 # ==========================================
-# 迷你資料庫與內建字典
+# 迷你資料庫：存取持股與「商品名稱記憶庫」
 # ==========================================
 HOLDINGS_FILE = "my_holdings.txt"
-# 預設字串就把名稱補齊，發揮示範作用
-DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050 元大台灣50, 009816 台積電購"
+NAME_CACHE_FILE = "name_cache.json"  # 🌟 新增：專屬的記憶大腦
+DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 009816"
 
-# 🌟 內建國民 ETF 字典，對付政府 API 不給 ETF 名稱的痛點
 COMMON_ETF_MAP = {
     "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
     "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
-    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年",
-    "00632R": "元大台灣50反1", "00631L": "元大台灣50正2"
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
 }
 
 def load_holdings():
@@ -36,8 +35,21 @@ def save_holdings(holdings_str):
     with open(HOLDINGS_FILE, "w", encoding="utf-8") as f:
         f.write(holdings_str)
 
+# 🌟 記憶大腦的讀取與存檔功能
+def load_name_cache():
+    if os.path.exists(NAME_CACHE_FILE):
+        try:
+            with open(NAME_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: return {}
+    return {}
+
+def save_name_cache(cache_dict):
+    with open(NAME_CACHE_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+
 # ==========================================
-# 工具與抓取函式 (雲端特化版)
+# 工具與抓取函式
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
@@ -62,7 +74,7 @@ def fetch_kline_data(ticker):
                 df.index = df.index.normalize()
                 df = df.dropna()
                 
-                # Yahoo 修正機制：挖出真實成交量
+                # Yahoo 修正機制：挖出真實成交量 (修復 0050 成交量為 0 的 Bug)
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0:
@@ -79,7 +91,6 @@ def fetch_openapi_names_and_volumes():
     headers = {'User-Agent': 'Mozilla/5.0'}
 
     try:
-        # 上市一般股票 (不含 ETF 與權證)
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10).json()
         for row in res:
             code = str(row.get('Code', '')).strip()
@@ -89,7 +100,6 @@ def fetch_openapi_names_and_volumes():
     except: pass
 
     try:
-        # 上櫃股票
         res = requests.get("https://www.tpex.org.tw/openapi/v1/dlyquote", headers=headers, timeout=10).json()
         for row in res:
             code = str(row.get('SecuritiesCompanyCode', '')).strip()
@@ -103,14 +113,14 @@ def fetch_openapi_names_and_volumes():
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板 (終極雲端版)")
+st.title("🏠 我的投資儀表板 (終極記憶版)")
 st.divider()
 
 current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    user_stocks_input = st.text_input("📝 持股清單 (建議加上名稱以利記憶)：", value=current_saved_holdings)
+    user_stocks_input = st.text_input("📝 持股清單 (輸入過一次名稱就會永久記憶)：", value=current_saved_holdings)
 with col2:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 with col3:
@@ -124,29 +134,40 @@ if save_btn:
     save_holdings(user_stocks_input)
     st.success("✅ 持股清單已成功存檔！")
 
-# 解析輸入，萃取代碼與自訂名稱
+# 🌟 載入記憶大腦
+name_cache = load_name_cache()
+cache_updated = False
+
+# 解析輸入
 pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
-user_name_map = {}
+
 for p in pairs:
-    c_match = re.search(r'\d{4,6}[A-Za-z]?', p) # 支援像 00679B 這種帶英文字母的代碼
+    c_match = re.search(r'\d{4,6}[A-Za-z]?', p)
     if c_match:
         code = c_match.group()
         my_codes.append(code)
-        # 移除代碼後，剩下的當作自訂名稱
+        
+        # 看看代碼後面有沒有跟著文字
         name_part = p.replace(code, '').strip()
         if name_part:
-            user_name_map[code] = name_part
+            # 如果有輸入名字，就寫入記憶大腦
+            name_cache[code] = name_part
+            cache_updated = True
+
+# 如果大腦有學到新單字，就存檔下來
+if cache_updated:
+    save_name_cache(name_cache)
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('同步官方資料與精準行情中...'):
+with st.spinner('同步官方資料庫與精準歷史行情中...'):
     api_name_map, api_vol_map = fetch_openapi_names_and_volumes()
 
     final_rows = []
     for code in my_codes:
-        # 🌟 命名最高原則：您輸入的自訂名稱 > 內建 ETF 字典 > 政府官方字典 > 只顯示代碼
-        name = user_name_map.get(code) or COMMON_ETF_MAP.get(code) or api_name_map.get(code, f"({code})")
+        # 🌟 找名字的最強順序：記憶大腦 > 內建 ETF 字典 > 政府官方 API > 殘酷的只顯示代碼
+        name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or api_name_map.get(code, f"({code})")
         
         df_k = fetch_kline_data(code)
         if not df_k.empty:
