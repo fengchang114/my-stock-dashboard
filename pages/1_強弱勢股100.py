@@ -1,136 +1,151 @@
 import streamlit as st
-import requests
 import pandas as pd
-import datetime
-import urllib3
-import io
+import json
+import os
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="盤後強弱勢股篩選", layout="wide")
+st.set_page_config(page_title="強弱勢股掃描", layout="wide", page_icon="🔥")
+st.title("🔥 強弱勢飆股掃描器")
+st.markdown("利用本地官方資料庫，瞬間篩選出盤面上**爆量且高振幅**的主力焦點股！")
 
-def convert_to_int(val):
-    try:
-        if isinstance(val, (int, float)): return int(val)
-        return int(str(val).replace(',', ''))
-    except: return 0
-
-def convert_to_float(val):
-    try:
-        val_str = str(val).strip()
-        if val_str in ['-', '', 'nan', 'None', '---']: return 0.0
-        return float(val_str.replace(',', ''))
-    except: return 0.0
-
+# ==========================================
+# 1. 讀取並整合上市櫃本地資料 (極速掃描核心)
+# ==========================================
 @st.cache_data(ttl=3600)
-def fetch_twse_data(date_str):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        url_price = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date_str}&type=ALL&response=json"
-        res = requests.get(url_price, headers=headers, verify=False, timeout=10)
-        data = res.json()
-        if data.get('stat') != 'OK': return None
-            
-        target_table = next((t for t in data.get('tables', []) if '收盤價' in t['fields']), None)
-        df = pd.DataFrame(target_table['data'], columns=target_table['fields'])
-        df = df[['證券代號', '證券名稱', '收盤價', '漲跌(+/-)', '漲跌價差', '成交股數']]
-        df.columns = ['代碼', '商品', '成交', '漲跌符號', '漲跌價差', '成交量_股']
-        
-        def calc_change(row):
-            sign = str(row['漲跌符號']).lower()
-            val = str(row['漲跌價差'])
-            try:
-                v = float(val.replace(',', ''))
-                if 'green' in sign or '-' in sign: return v * -1
-                return v
-            except: return 0.0
-            
-        df['漲跌'] = df.apply(calc_change, axis=1)
-        return df[['代碼', '商品', '成交', '漲跌', '成交量_股']]
-    except: return None
-
-@st.cache_data(ttl=3600)
-def fetch_tpex_data(date_obj):
-    roc_year = date_obj.year - 1911
-    date_str = f"{roc_year}/{date_obj.strftime('%m/%d')}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        url_price = f"https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={date_str}"
-        res = requests.get(url_price, headers=headers, verify=False, timeout=10)
-        data = res.json()
-        if 'aaData' not in data or not data['aaData']: return None
-            
-        df = pd.DataFrame(data['aaData'])
-        df = df.iloc[:, [0, 1, 2, 3, 8]]
-        df.columns = ['代碼', '商品', '成交', '漲跌', '成交量_股']
-        return df
-    except: return None
-
-st.title("📈 盤後強弱勢股篩選器")
-st.markdown("抓取上市櫃全市場資料，篩選條件：**排除ETF與權證、量大於千張、排除-KY、取前100大**")
-
-col1, col2 = st.columns([1, 3])
-with col1:
-    selected_date = st.date_input("請選擇查詢日期", datetime.date.today())
-    run_button = st.button("🚀 開始抓取與篩選", use_container_width=True)
-
-if run_button:
-    query_date_str = selected_date.strftime('%Y%m%d')
+def load_all_market_data():
+    all_stocks = []
     
-    with st.spinner(f'正在向證交所與櫃買中心獲取 {selected_date} 的資料...'):
-        df_twse = fetch_twse_data(query_date_str)
-        df_tpex = fetch_tpex_data(selected_date)
+    # 解析上市資料
+    if os.path.exists("STOCK_DAY_ALL.json"):
+        try:
+            with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
+                for row in json.load(f):
+                    try:
+                        code = str(row.get('Code', '')).strip()
+                        name = str(row.get('Name', '')).strip()
+                        # 上市成交量單位是「股」，除以 1000 變「張」
+                        vol = int(row.get('TradeVolume', 0).replace(',', '')) // 1000
+                        open_p = float(row.get('OpeningPrice', 0).replace(',', ''))
+                        high_p = float(row.get('HighestPrice', 0).replace(',', ''))
+                        low_p = float(row.get('LowestPrice', 0).replace(',', ''))
+                        close_p = float(row.get('ClosingPrice', 0).replace(',', ''))
+                        change = float(row.get('Change', 0).replace(',', ''))
+                        
+                        # 避開沒有成交或暫停交易的股票
+                        if vol > 0 and close_p > 0:
+                            all_stocks.append({
+                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
+                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
+                            })
+                    except: continue
+        except: pass
 
-    if df_twse is None and df_tpex is None:
-        st.error(f"⚠️ {selected_date} 查無資料，可能為假日或盤後資料尚未更新。")
+    # 解析上櫃資料
+    if os.path.exists("dlyquote.json"):
+        try:
+            with open("dlyquote.json", "r", encoding="utf-8") as f:
+                for row in json.load(f):
+                    try:
+                        code = str(row.get('SecuritiesCompanyCode', '')).strip()
+                        name = str(row.get('CompanyName', '')).strip()
+                        # 上櫃成交量單位是「千股」，也就是「張」
+                        vol = int(row.get('TradingVolume', 0).replace(',', '')) 
+                        open_p = float(row.get('Open', 0).replace(',', ''))
+                        high_p = float(row.get('High', 0).replace(',', ''))
+                        low_p = float(row.get('Low', 0).replace(',', ''))
+                        close_p = float(row.get('Close', 0).replace(',', ''))
+                        change = float(row.get('Change', 0).replace(',', ''))
+                        
+                        if vol > 0 and close_p > 0:
+                            all_stocks.append({
+                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
+                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
+                            })
+                    except: continue
+        except: pass
+
+    df = pd.DataFrame(all_stocks)
+    if not df.empty:
+        # 計算昨收與振幅
+        df['昨收'] = df['收盤'] - df['漲跌']
+        # 避免除以 0 的錯誤
+        df = df[df['昨收'] > 0]
+        df['漲幅%'] = (df['漲跌'] / df['昨收']) * 100
+        df['振幅%'] = ((df['最高'] - df['最低']) / df['昨收']) * 100
+    return df
+
+# ==========================================
+# 2. 篩選介面與邏輯
+# ==========================================
+df_all = load_all_market_data()
+
+if df_all.empty:
+    st.error("⚠️ 找不到本地資料庫！請確認 `STOCK_DAY_ALL.json` 與 `dlyquote.json` 存在於主目錄中。")
+else:
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        scan_type = st.selectbox("🎯 掃描方向", ["📈 強勢多頭 (漲幅>0)", "📉 弱勢空頭 (跌幅<0)"])
+    with col2:
+        min_vol = st.number_input("📊 最低成交量 (張) [爆量過濾]", min_value=100, value=2000, step=500)
+    with col3:
+        min_amp = st.number_input("🎢 最低振幅 (%) [波動過濾]", min_value=0.0, value=5.0, step=1.0)
+    with col4:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        is_gap = st.checkbox("🚀 必須帶有跳空 (開高/開低)")
+
+    # 執行篩選
+    mask_vol = df_all['成交量(張)'] >= min_vol
+    mask_amp = df_all['振幅%'] >= min_amp
+    
+    if "強勢" in scan_type:
+        mask_dir = df_all['漲幅%'] > 0
+        mask_gap = (df_all['開盤'] > df_all['昨收']) if is_gap else True
+        df_result = df_all[mask_vol & mask_amp & mask_dir & mask_gap].sort_values('漲幅%', ascending=False)
     else:
-        df_all = pd.concat([d for d in [df_twse, df_tpex] if d is not None], ignore_index=True)
-        df_all['商品'] = df_all['商品'].str.strip()
-        df_all['代碼'] = df_all['代碼'].str.strip()
-        df_all['成交量_股'] = df_all['成交量_股'].apply(convert_to_int)
-        df_all['成交量_張'] = df_all['成交量_股'] // 1000
-        df_all['成交'] = df_all['成交'].apply(convert_to_float)
-        df_all['漲跌'] = df_all['漲跌'].apply(convert_to_float)
+        mask_dir = df_all['漲幅%'] < 0
+        mask_gap = (df_all['開盤'] < df_all['昨收']) if is_gap else True
+        df_result = df_all[mask_vol & mask_amp & mask_dir & mask_gap].sort_values('漲幅%', ascending=True)
 
-        def calc_pct(row):
-            close = row['成交']
-            change = row['漲跌']
-            prev_close = close - change
-            if prev_close > 0: return round((change / prev_close) * 100, 2)
-            return 0.0
-        df_all['漲幅%'] = df_all.apply(calc_pct, axis=1)
+    # 整理最後要顯示的欄位
+    df_display = df_result[['代碼', '商品', '開盤', '最高', '最低', '收盤', '漲跌', '漲幅%', '振幅%', '成交量(張)']].head(50) # 最多顯示前50名
 
-        # 條件篩選 (大盤強弱勢)
-        cond_not_etf = ~df_all['代碼'].str.startswith('00')
-        cond_not_warrant = df_all['代碼'].str.len() < 6
-        df_filtered = df_all[cond_not_etf & cond_not_warrant].copy()
-        df_filtered = df_filtered[df_filtered['成交量_張'] >= 1000]
-        df_filtered = df_filtered[~df_filtered['商品'].str.contains('KY', na=False)]
+    # ==========================================
+    # 3. 大字體 HTML 完美渲染
+    # ==========================================
+    st.divider()
+    st.subheader(f"🔍 掃描結果：共發現 {len(df_result)} 檔符合條件的標的 (顯示前50檔)")
+    
+    if not df_display.empty:
+        def custom_style(row):
+            styles = []
+            for col in row.index:
+                css = ""
+                if col == '收盤': css += "font-weight: bold; "
+                
+                if col in ['漲跌', '漲幅%']:
+                    if row[col] > 0: css += "color: #ff4b4b; "
+                    elif row[col] < 0: css += "color: #1e7b1e; " 
+                
+                # 振幅特別標示顏色 (橘色)
+                if col == '振幅%':
+                    css += "color: #ff8c00; font-weight: bold; "
+                
+                if row['漲幅%'] >= 9.85: css += "background-color: rgba(255, 75, 75, 0.2); "
+                elif row['漲幅%'] <= -9.85: css += "background-color: rgba(0, 136, 0, 0.15); " 
+                    
+                styles.append(css)
+            return styles
 
-        target_cols = ['商品', '代碼', '成交', '漲幅%']
-        df_strong = df_filtered.sort_values(by='漲幅%', ascending=False).head(100)[target_cols]
-        df_weak = df_filtered.sort_values(by='漲幅%', ascending=True).head(100)[target_cols]
-
-        st.divider()
+        styled_df = df_display.style.apply(custom_style, axis=1)\
+                          .format({"開盤": "{:.2f}", "最高": "{:.2f}", "最低": "{:.2f}", 
+                                   "收盤": "{:.2f}", "漲跌": "{:.2f}", 
+                                   "漲幅%": "{:.2f} %", "振幅%": "{:.2f} %", "成交量(張)": "{:.0f}"})\
+                          .hide(axis="index")\
+                          .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
+                          .set_table_styles([
+                              {'selector': 'th', 'props': [('font-size', '20px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
+                              {'selector': 'td', 'props': [('font-size', '20px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                          ])
         
-        col_s, col_w = st.columns(2)
-        with col_s:
-            st.subheader("🔥 強勢股前 100 名")
-            st.dataframe(df_strong, height=500, hide_index=True, use_container_width=True)
-        with col_w:
-            st.subheader("🧊 弱勢股前 100 名")
-            st.dataframe(df_weak, height=500, hide_index=True, use_container_width=True)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_strong.to_excel(writer, sheet_name='強勢股前100', index=False)
-            df_weak.to_excel(writer, sheet_name='弱勢股前100', index=False)
-        output.seek(0)
-        
-        st.success("✅ 資料運算完成！")
-        st.download_button(
-            label="📥 下載 Excel 報表",
-            data=output,
-            file_name=f"強弱勢股篩選_{query_date_str}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary"
-        )
+        st.markdown(styled_df.to_html(), unsafe_allow_html=True)
+    else:
+        st.info("💡 目前沒有符合上述條件的標的，您可以嘗試放寬「成交量」或「振幅」的條件。")
