@@ -17,7 +17,17 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 # ==========================================
 HOLDINGS_FILE = "my_holdings.txt"
 NAME_CACHE_FILE = "name_cache.json" 
-DEFAULT_HOLDINGS = "2317 鴻海, 3481 群創, 1815 富喬, 1802 台玻, 0050, 009816"
+
+# 🌟 專為您客製化的預設持股清單，把大盤放在第一位當作整體盤勢參考
+DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 2330 台積電, 2317 鴻海, 1815 富喬, 3481 群創, 1802 台玻, 1717 長興, 4952 凌通"
+
+# 🌟 內建大盤指數與熱門 ETF 字典
+COMMON_ETF_MAP = {
+    "^TWII": "加權指數", "^TWOII": "櫃買指數",
+    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
+    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
+}
 
 def load_holdings():
     if os.path.exists(HOLDINGS_FILE):
@@ -42,17 +52,12 @@ def save_name_cache(cache_dict):
         json.dump(cache_dict, f, ensure_ascii=False, indent=2)
 
 # ==========================================
-# 🌟 核心升級：讀取您上傳的本地官方名冊
+# 讀取本地官方名冊 (支援上市與上櫃)
 # ==========================================
-@st.cache_data(ttl=86400) # 字典一天讀一次就好，超省效能
-# ==========================================
-# 🌟 核心升級：同時讀取「上市」與「上櫃」本地官方名冊
-# ==========================================
-@st.cache_data(ttl=86400) # 字典一天讀一次就好，超省效能
+@st.cache_data(ttl=86400) 
 def load_local_official_dictionary():
     name_map = {}
     
-    # 1. 讀取上市字典 (STOCK_DAY_ALL.json)
     if os.path.exists("STOCK_DAY_ALL.json"):
         try:
             with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
@@ -60,22 +65,18 @@ def load_local_official_dictionary():
                 for row in data:
                     code = str(row.get('Code', '')).strip()
                     name = str(row.get('Name', '')).strip()
-                    if code and name:
-                        name_map[code] = name
+                    if code and name: name_map[code] = name
         except Exception as e:
             st.error(f"讀取上市本地字典失敗: {e}")
 
-    # 2. 讀取上櫃字典 (dlyquote.json)
     if os.path.exists("dlyquote.json"):
         try:
             with open("dlyquote.json", "r", encoding="utf-8") as f:
                 data = json.load(f)
                 for row in data:
-                    # 注意：上櫃檔案的欄位名稱跟上市的不一樣！
                     code = str(row.get('SecuritiesCompanyCode', '')).strip()
                     name = str(row.get('CompanyName', '')).strip()
-                    if code and name:
-                        name_map[code] = name
+                    if code and name: name_map[code] = name
         except Exception as e:
             st.error(f"讀取上櫃本地字典失敗: {e}")
             
@@ -87,7 +88,10 @@ def load_local_official_dictionary():
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    for suffix in ['.TW', '.TWO']:
+    # 🌟 解鎖大盤代號：如果是 ^ 開頭的指數代號，就不需要加上 .TW 或 .TWO 後綴
+    suffixes = ['.TW', '.TWO'] if not ticker.startswith('^') else ['']
+    
+    for suffix in suffixes:
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
             res = requests.get(url, headers=headers, timeout=5)
@@ -107,7 +111,6 @@ def fetch_kline_data(ticker):
                 df.index = df.index.normalize()
                 df = df.dropna()
                 
-                # Yahoo 修正機制：挖出真實成交量 (修復 0050 等 ETF 成交量為 0 的 Bug)
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0:
@@ -120,14 +123,14 @@ def fetch_kline_data(ticker):
 # ==========================================
 # 介面與核心邏輯
 # ==========================================
-st.title("🏠 我的投資儀表板 (本地字典全解鎖版)")
+st.title("🏠 我的投資儀表板")
 st.divider()
 
 current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    user_stocks_input = st.text_input("📝 持股清單：", value=current_saved_holdings)
+    user_stocks_input = st.text_input("📝 持股清單 (支援大盤代號 ^TWII)：", value=current_saved_holdings)
 with col2:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 with col3:
@@ -141,7 +144,6 @@ if save_btn:
     save_holdings(user_stocks_input)
     st.success("✅ 持股清單已成功存檔！")
 
-# 🌟 載入雙重大腦：本地官方名冊 + 您的動態記憶
 official_name_map = load_local_official_dictionary()
 name_cache = load_name_cache()
 cache_updated = False
@@ -150,7 +152,8 @@ pairs = [s.strip() for s in user_stocks_input.split(',')]
 my_codes = []
 
 for p in pairs:
-    c_match = re.search(r'\d{4,6}[A-Za-z]?', p)
+    # 🌟 解鎖格式限制：現在可以抓取包含特殊符號 ^ 的英文+數字組合
+    c_match = re.search(r'\^?[A-Za-z0-9]+', p)
     if c_match:
         code = c_match.group()
         my_codes.append(code)
@@ -168,8 +171,7 @@ target_ts = pd.Timestamp(selected_date).normalize()
 with st.spinner('從本地字典庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
-        # 🌟 找名字的黃金順序：動態記憶大腦 > 本地官方 STOCK_DAY_ALL 字典 > 只顯示代碼
-        name = name_cache.get(code) or official_name_map.get(code) or f"({code})"
+        name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or official_name_map.get(code) or f"({code})"
         
         df_k = fetch_kline_data(code)
         if not df_k.empty:
@@ -199,7 +201,7 @@ with st.spinner('從本地字典庫調閱資料與精算行情中...'):
 if final_rows:
     df_final = pd.DataFrame(final_rows)
     
-    st.subheader(f"💡 {selected_date} 持股表現")
+    st.subheader(f"💡 {selected_date} 盤勢與持股表現")
     st.dataframe(
         df_final, hide_index=True, use_container_width=True,
         column_config={
