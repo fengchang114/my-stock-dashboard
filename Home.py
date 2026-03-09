@@ -222,8 +222,8 @@ if final_rows:
                       .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
                       .set_table_styles([
                           # 這裡可以盡情設定您要的字體大小，22px 或 30px 都絕對會生效！
-                          {'selector': 'th', 'props': [('font-size', '20px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
-                          {'selector': 'td', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                          {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
+                          {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
                       ])
     
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
@@ -263,4 +263,5 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+
 
