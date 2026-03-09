@@ -18,10 +18,9 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 HOLDINGS_FILE = "my_holdings.txt"
 NAME_CACHE_FILE = "name_cache.json" 
 
-# 🌟 專為您客製化的預設持股清單，把大盤放在第一位當作整體盤勢參考
-DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 2330 台積電, 2317 鴻海, 1815 富喬, 3481 群創, 1802 台玻, 1717 長興, 4952 凌通"
+# 🌟 預設持股清單
+DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 1717 長興, 1802 台玻, 2317 鴻海, 4952 凌通"
 
-# 🌟 內建大盤指數與熱門 ETF 字典
 COMMON_ETF_MAP = {
     "^TWII": "加權指數", "^TWOII": "櫃買指數",
     "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
@@ -52,70 +51,56 @@ def save_name_cache(cache_dict):
         json.dump(cache_dict, f, ensure_ascii=False, indent=2)
 
 # ==========================================
-# 讀取本地官方名冊 (支援上市與上櫃)
+# 讀取本地官方名冊
 # ==========================================
 @st.cache_data(ttl=86400) 
 def load_local_official_dictionary():
     name_map = {}
-    
     if os.path.exists("STOCK_DAY_ALL.json"):
         try:
             with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for row in data:
-                    code = str(row.get('Code', '')).strip()
-                    name = str(row.get('Name', '')).strip()
-                    if code and name: name_map[code] = name
-        except Exception as e:
-            st.error(f"讀取上市本地字典失敗: {e}")
+                for row in json.load(f):
+                    c, n = str(row.get('Code', '')).strip(), str(row.get('Name', '')).strip()
+                    if c and n: name_map[c] = n
+        except: pass
 
     if os.path.exists("dlyquote.json"):
         try:
             with open("dlyquote.json", "r", encoding="utf-8") as f:
-                data = json.load(f)
-                for row in data:
-                    code = str(row.get('SecuritiesCompanyCode', '')).strip()
-                    name = str(row.get('CompanyName', '')).strip()
-                    if code and name: name_map[code] = name
-        except Exception as e:
-            st.error(f"讀取上櫃本地字典失敗: {e}")
-            
+                for row in json.load(f):
+                    c, n = str(row.get('SecuritiesCompanyCode', '')).strip(), str(row.get('CompanyName', '')).strip()
+                    if c and n: name_map[c] = n
+        except: pass
     return name_map
 
 # ==========================================
-# 工具與抓取函式 (Yahoo 報價引擎)
+# 工具與抓取函式
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    # 🌟 解鎖大盤代號：如果是 ^ 開頭的指數代號，就不需要加上 .TW 或 .TWO 後綴
     suffixes = ['.TW', '.TWO'] if not ticker.startswith('^') else ['']
     
     for suffix in suffixes:
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
-            res = requests.get(url, headers=headers, timeout=5)
-            data = res.json()
-            result = data.get('chart', {}).get('result')
+            res = requests.get(url, headers=headers, timeout=5).json()
+            result = res.get('chart', {}).get('result')
             if result:
                 meta = result[0].get('meta', {})
-                timestamps = result[0]['timestamp']
                 quote = result[0]['indicators']['quote'][0]
-                adj_close = result[0]['indicators']['adjclose'][0]['adjclose']
                 df = pd.DataFrame({
-                    'Close': adj_close,
+                    'Close': result[0]['indicators']['adjclose'][0]['adjclose'],
                     'Open': quote['open'], 'High': quote['high'], 'Low': quote['low'],
                     'Volume': quote['volume']
                 })
-                df.index = pd.to_datetime(timestamps, unit='s') + pd.Timedelta(hours=8)
+                df.index = pd.to_datetime(result[0]['timestamp'], unit='s') + pd.Timedelta(hours=8)
                 df.index = df.index.normalize()
                 df = df.dropna()
                 
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
-                    if reg_vol > 0:
-                        df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
-                        
+                    if reg_vol > 0: df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
                 return df
         except: continue
     return pd.DataFrame()
@@ -130,7 +115,7 @@ current_saved_holdings = load_holdings()
 
 col1, col2, col3 = st.columns([4, 1, 1])
 with col1:
-    user_stocks_input = st.text_input("📝 持股清單 (支援大盤代號 ^TWII)：", value=current_saved_holdings)
+    user_stocks_input = st.text_input("📝 持股清單 (支援防呆輸入，空格/逗號皆可)：", value=current_saved_holdings)
 with col2:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 with col3:
@@ -148,23 +133,31 @@ official_name_map = load_local_official_dictionary()
 name_cache = load_name_cache()
 cache_updated = False
 
-pairs = [s.strip() for s in user_stocks_input.split(',')]
+# 🌟 智慧防呆解析引擎
+raw_str = user_stocks_input.replace('、', ',').replace('，', ',')
+pairs = [s.strip() for s in raw_str.split(',')]
 my_codes = []
 
 for p in pairs:
-    # 🌟 解鎖格式限制：現在可以抓取包含特殊符號 ^ 的英文+數字組合
-    c_match = re.search(r'\^?[A-Za-z0-9]+', p)
-    if c_match:
-        code = c_match.group()
-        my_codes.append(code)
-        
-        name_part = p.replace(code, '').strip()
-        if name_part:
-            name_cache[code] = name_part
-            cache_updated = True
+    tokens = p.split()
+    current_codes = []
+    name_tokens = []
+    
+    for t in tokens:
+        if re.match(r'^\^?[A-Za-z]?\d{4,6}[A-Za-z]?$', t) or t in COMMON_ETF_MAP:
+            current_codes.append(t)
+            if t not in my_codes:
+                my_codes.append(t)
+        else:
+            name_tokens.append(t)
+            
+    if current_codes and name_tokens:
+        target_code = current_codes[-1]
+        name_part = " ".join(name_tokens)
+        name_cache[target_code] = name_part
+        cache_updated = True
 
-if cache_updated:
-    save_name_cache(name_cache)
+if cache_updated: save_name_cache(name_cache)
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
@@ -172,8 +165,8 @@ with st.spinner('從本地字典庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
         name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or official_name_map.get(code) or f"({code})"
-        
         df_k = fetch_kline_data(code)
+        
         if not df_k.empty:
             if target_ts in df_k.index:
                 k_target = df_k.loc[target_ts]
@@ -193,29 +186,56 @@ with st.spinner('從本地字典庫調閱資料與精算行情中...'):
                     '代碼': code, '商品': name,
                     '開盤': round(float(k_target['Open']), 2), '最高': round(float(k_target['High']), 2),
                     '最低': round(float(k_target['Low']), 2), '收盤': round(price, 2), 
-                    '漲跌': round(change, 2), '漲幅%': round(pct, 2),
-                    '成交量(張)': vol
+                    '漲跌': round(change, 2), '漲幅%': round(pct, 2), '成交量(張)': vol
                 })
 
 # --- 顯示持股表格 ---
 if final_rows:
     df_final = pd.DataFrame(final_rows)
     
+    def custom_style(row):
+        styles = []
+        for col in row.index:
+            css = ""
+            if col == '收盤':
+                css += "font-weight: bold; "
+            
+            if col in ['漲跌', '漲幅%']:
+                if row[col] > 0:
+                    css += "color: #ff4b4b; " 
+                elif row[col] < 0:
+                    css += "color: #1e7b1e; " 
+            
+            if row['漲幅%'] >= 9.85:
+                css += "background-color: rgba(255, 75, 75, 0.2); "
+            elif row['漲幅%'] <= -9.85:
+                css += "background-color: rgba(0, 136, 0, 0.15); " 
+                
+            styles.append(css)
+        return styles
+
+    # 🌟 透過 Pandas 的 set_table_styles 與 set_table_attributes 直接從底層灌入樣式
+    styled_df = df_final.style.apply(custom_style, axis=1)\
+                      .format({"開盤": "{:.2f}", "最高": "{:.2f}", "最低": "{:.2f}", 
+                               "收盤": "{:.2f}", "漲跌": "{:.2f}", "漲幅%": "{:.2f} %", "成交量(張)": "{:.0f}"})\
+                      .hide(axis="index")\
+                      .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
+                      .set_table_styles([
+                          # 這裡可以盡情設定您要的字體大小，22px 或 30px 都絕對會生效！
+                          {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
+                          {'selector': 'td', 'props': [('font-size', '17px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                      ])
+    
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
-    st.dataframe(
-        df_final, hide_index=True, use_container_width=True,
-        column_config={
-            "開盤": st.column_config.NumberColumn(format="%.2f"),
-            "最高": st.column_config.NumberColumn(format="%.2f"),
-            "最低": st.column_config.NumberColumn(format="%.2f"),
-            "收盤": st.column_config.NumberColumn(format="%.2f"),
-            "漲跌": st.column_config.NumberColumn(format="%.2f"),
-            "漲幅%": st.column_config.NumberColumn(format="%.2f %%"),
-            "成交量(張)": st.column_config.NumberColumn(format="%d")
-        }
-    )
+    
+    # 🌟 捨棄 st.table()！直接把格式化好的 HTML 畫布丟給瀏覽器強制渲染！
+    html_table = styled_df.to_html()
+    st.markdown(html_table, unsafe_allow_html=True)
 
     # --- 下半部 K 線圖 ---
+
+    # --- 下半部 K 線圖 ---
+    # ... (下方 K 線圖區塊維持原樣即可)
     st.divider()
     selected_stock_str = st.selectbox("圖表分析：", [f"{r['代碼']} {r['商品']}" for _, r in df_final.iterrows()])
     if selected_stock_str:
