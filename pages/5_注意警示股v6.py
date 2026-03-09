@@ -4,17 +4,15 @@ import yfinance as yf
 import twstock
 import requests
 import datetime
-import time
 import urllib3
 import re
-import os
 
 # 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="異常注意警示股", layout="wide", page_icon="🚨")
 
 st.title("🚨 異常注意警示股雷達")
-st.markdown("自動比對交易所官方公告，結合技術面 **6 日累計漲幅**，為您提前揪出「處置股」、「注意股」與「即將關禁閉」的高風險/高熱度妖股！")
+st.markdown("自動比對交易所官方公告，並為您解析 **5分/20分 分盤交易狀態**，提前揪出「處置股」、「注意股」與「即將關禁閉」的高風險妖股！")
 
 # ==========================================
 # 1. 智慧解析函式 (注意股用)
@@ -67,7 +65,7 @@ def get_all_stock_tickers():
     return yf_tickers, info_map
 
 # ==========================================
-# 3. 抓取官方公告數據
+# 3. 🌟 抓取官方公告數據 (升級：解析撮合時間)
 # ==========================================
 @st.cache_data(ttl=1800)
 def get_official_market_data(target_date):
@@ -88,7 +86,7 @@ def get_official_market_data(target_date):
         if res.get('stat') == 'OK' and res.get('data'):
             notice_set = smart_extract_codes_to_set(res['data'])
 
-        # B. 處置股
+        # B. 處置股 (🌟 解析 5分 / 20分)
         url_punish = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str}&endDate={today_str}&response=json"
         res = requests.get(url_punish, timeout=10, headers=headers_base, verify=False).json()
         if res.get('stat') == 'OK' and res.get('data'):
@@ -103,8 +101,18 @@ def get_official_market_data(target_date):
                 for row in raw_data:
                     code_str = str(row[code_idx]).split()[0].strip()
                     time_str = str(row[time_idx]).strip() if time_idx != -1 else "未抓到時間"
+                    
+                    # 將整列文字合併，尋找撮合時間關鍵字
+                    row_text = "".join(str(item) for item in row)
+                    if "四十五分" in row_text or "45分" in row_text:
+                        match_time = "45分"
+                    elif "二十分" in row_text or "20分" in row_text:
+                        match_time = "20分"
+                    else:
+                        match_time = "5分" # 通常第一次處置為 5 分鐘
+                        
                     if code_str.isdigit() and len(code_str) == 4:
-                        punish_db[code_str] = time_str
+                        punish_db[code_str] = {"期間": time_str, "分盤": match_time}
 
         # C. 三大法人籌碼
         try:
@@ -155,7 +163,6 @@ if start_btn:
     yf_tickers_all, info_map = get_all_stock_tickers()
     target_tickers = []
     
-    # 決定掃描清單
     if scan_mode == "全市場自動掃描 (推薦)":
         target_tickers = yf_tickers_all
     else:
@@ -174,11 +181,10 @@ if start_btn:
                 st.error(f"讀取 Excel 失敗: {e}")
                 st.stop()
 
-    # 執行資料抓取
-    with st.spinner("連線交易所擷取官方異常公告與籌碼..."):
+    with st.spinner("連線交易所擷取官方異常公告與撮合時間..."):
         chips_db, notice_set, punish_db = get_official_market_data(target_date)
 
-    st.info(f"官方數據取得完畢：共發現處置股 {len(punish_db)} 檔、注意股 {len(notice_set)} 檔。正在計算近期漲幅預警...")
+    st.info(f"官方數據取得完畢：共發現處置股 {len(punish_db)} 檔、注意股 {len(notice_set)} 檔。正在運算近期技術漲幅...")
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -204,7 +210,7 @@ if start_btn:
                     if df.empty or len(df) < 7: continue
                     
                     last_idx_date = df.index[-1].replace(tzinfo=None).date()
-                    if last_idx_date > target_date: continue # 避免抓到未來的資料
+                    if last_idx_date > target_date: continue
 
                     code = info_map.get(ticker, {}).get("代碼", ticker.replace('.TW','').replace('.TWO',''))
                     last_row, prev_row = df.iloc[-1], df.iloc[-2]
@@ -215,10 +221,17 @@ if start_btn:
                     close_6d_ago = float(df['Close'].iloc[-7]) if len(df) >= 7 else float(df['Close'].iloc[0])
                     six_day_change = ((close - close_6d_ago) / close_6d_ago) * 100 if close_6d_ago != 0 else 0
                     
-                    # 判斷官方狀態
+                    # 🌟 取得官方狀態與撮合時間
                     status = "一般"
-                    if code in punish_db: status = "🚫處置股"
-                    elif code in notice_set: status = "📢注意股"
+                    match_time = "-"
+                    punish_period = ""
+                    
+                    if code in punish_db: 
+                        status = "🚫處置股"
+                        match_time = punish_db[code]["分盤"]
+                        punish_period = punish_db[code]["期間"]
+                    elif code in notice_set: 
+                        status = "📢注意股"
                     
                     # 判斷技術預警
                     warning = "正常"
@@ -226,7 +239,6 @@ if start_btn:
                         if six_day_change >= 25: warning = "🚨達注意標準"
                         elif six_day_change >= 22: warning = "⚠️即將注意"
 
-                    # 🌟 核心過濾機制：只保留有異常的股票！
                     if status == "一般" and warning == "正常":
                         continue
 
@@ -234,13 +246,14 @@ if start_btn:
                         "代碼": code,
                         "名稱": info_map.get(ticker, {}).get("名稱", "未知"),
                         "狀態": status,
+                        "分盤": match_time, # 🌟 新增的撮合欄位
                         "預警": warning,
                         "收盤": round(close, 2),
                         "單日漲幅%": round(change_pct, 2),
                         "6日累計漲幅%": round(six_day_change, 2),
                         "外資": chips_db.get(code, {}).get("外資", 0),
                         "投信": chips_db.get(code, {}).get("投信", 0),
-                        "處置期間": punish_db.get(code, "") if status == "🚫處置股" else ""
+                        "處置期間": punish_period
                     })
                 except: continue
         except: pass
@@ -253,7 +266,6 @@ if start_btn:
     # ==========================================
     if all_results:
         df_final = pd.DataFrame(all_results)
-        # 依照危險程度與漲幅排序
         df_final['排序權重'] = df_final['狀態'].map({'🚫處置股': 3, '📢注意股': 2, '一般': 1})
         df_final = df_final.sort_values(by=['排序權重', '6日累計漲幅%'], ascending=[False, False]).drop(columns=['排序權重'])
         
@@ -271,15 +283,19 @@ if start_btn:
                     if row[col] > 0: css += "color: #ff4b4b; "
                     elif row[col] < 0: css += "color: #1e7b1e; "
 
-                # 狀態專屬強調色
                 if col == '狀態':
-                    if row[col] == '🚫處置股': css += "color: white; background-color: #8B0000; font-weight: bold;" # 深紅底
-                    elif row[col] == '📢注意股': css += "color: black; background-color: #FFD700; font-weight: bold;" # 金黃底
+                    if row[col] == '🚫處置股': css += "color: white; background-color: #8B0000; font-weight: bold;"
+                    elif row[col] == '📢注意股': css += "color: black; background-color: #FFD700; font-weight: bold;"
                 
-                # 預警專屬強調色
+                # 🌟 撮合分盤專屬顏色：區分 5分、20分、45分
+                if col == '分盤':
+                    if row[col] == '5分': css += "color: white; background-color: #E85D04; font-weight: bold;" # 橘紅色 (尚可接受)
+                    elif row[col] == '20分': css += "color: white; background-color: #4B0082; font-weight: bold;" # 深紫色 (極度危險)
+                    elif row[col] == '45分': css += "color: white; background-color: #000000; font-weight: bold;" # 黑色 (徹底冰凍)
+
                 if col == '預警':
                     if row[col] == '🚨達注意標準': css += "color: #ff4b4b; font-weight: bold;"
-                    elif row[col] == '⚠️即將注意': css += "color: #ff8c00; font-weight: bold;" # 橘色
+                    elif row[col] == '⚠️即將注意': css += "color: #ff8c00; font-weight: bold;"
 
                 styles.append(css)
             return styles
@@ -291,11 +307,10 @@ if start_btn:
                           .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
                           .set_table_styles([
                               {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
-                              {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                              {'selector': 'td', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
                           ])
         
         st.success(f"🔍 掃描完成！共發現 {len(df_final)} 檔異常風險標的：")
         st.markdown(styled_df.to_html(), unsafe_allow_html=True)
     else:
-
         st.success("🎉 掃描完成！在您選擇的範圍內，目前沒有任何股票觸發異常警示，盤面非常健康！")
