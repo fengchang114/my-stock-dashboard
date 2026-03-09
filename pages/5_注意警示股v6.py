@@ -291,10 +291,11 @@ if start_btn:
                           .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
                           .set_table_styles([
                               {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
-                              {'selector': 'td', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                              {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
                           ])
         
         st.success(f"🔍 掃描完成！共發現 {len(df_final)} 檔異常風險標的：")
         st.markdown(styled_df.to_html(), unsafe_allow_html=True)
     else:
+
         st.success("🎉 掃描完成！在您選擇的範圍內，目前沒有任何股票觸發異常警示，盤面非常健康！")
