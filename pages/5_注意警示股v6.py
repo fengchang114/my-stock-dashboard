@@ -14,7 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="異常注意警示股", layout="wide", page_icon="🚨")
 
 # --- [新增] 初始化 Supabase ---
-@st.cache_resource
+# @st.cache_resource
 def init_supabase() -> Client:
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
@@ -163,3 +163,4 @@ st.title("🚨 異常注意警示股雷達 (DB快取版)")
 
 # 這裡省略重複的 UI 與 yf 運算代碼，請將您原本的第 4、5、6 段直接貼在下方
 # 只需確保呼叫的是 get_official_market_data(target_date) 即可！
+
