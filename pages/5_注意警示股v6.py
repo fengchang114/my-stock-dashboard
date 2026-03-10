@@ -94,57 +94,38 @@ def get_all_stock_tickers():
     yf_tickers, info_map = [], {}
     for code, info in twstock.codes.items():
         if info.type == '股票':
-            suffix = ".TWO" if info.market == "上櫃" else ".TW"
+            suffix = ".TWO" if info.market in ["上櫃", "興櫃"] else ".TW"
             ticker = f"{code}{suffix}"
             yf_tickers.append(ticker)
             info_map[ticker] = {"代碼": code, "名稱": info.name, "產業": info.group}
     return yf_tickers, info_map
 
-# --- 5. 官方數據與籌碼爬蟲 ---
+# --- 5. 官方數據 (移除籌碼爬蟲) ---
 def get_official_market_data(target_date):
     date_str = target_date.strftime('%Y-%m-%d')
     today_str_twse = target_date.strftime('%Y%m%d')
-    roc_year = target_date.year - 1911
-    tpex_date_str = f"{roc_year}/{target_date.strftime('%m/%d')}"
     
-    chips_db, notice_set, punish_db = {}, set(), {}
+    notice_set, punish_db = set(), {}
     headers_base = {'User-Agent': 'Mozilla/5.0'}
 
-    # 1. 抓取即時籌碼 (法人買賣超)
-    try:
-        twse_chip_url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={today_str_twse}&selectType=ALL&response=json"
-        res_c = requests.get(twse_chip_url, timeout=5, headers=headers_base, verify=False).json()
-        if res_c.get('stat') == 'OK':
-            for row in res_c['data']:
-                chips_db[row[0]] = {"外資": int(row[4].replace(',', '')) // 1000, "投信": int(row[10].replace(',', '')) // 1000}
-        
-        tpex_chip_url = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={tpex_date_str}"
-        res_tc = requests.get(tpex_chip_url, timeout=5, headers=headers_base, verify=False).json()
-        tpex_data = res_tc.get('aaData') or res_tc.get('tables', [{}])[0].get('data', [])
-        for row in tpex_data:
-            chips_db[row[0]] = {"外資": int(row[10].replace(',', '')) // 1000, "投信": int(row[13].replace(',', '')) // 1000}
-    except: pass
-
-    # 2. 處理注意/處置股 (查快取或爬蟲)
+    # 1. 優先查快取
     cached_notice, cached_punish = get_market_data_from_cache(date_str)
     if cached_notice is not None:
         st.toast("✅ 已載入 Supabase 雲端快取數據")
-        return chips_db, cached_notice, cached_punish
+        return cached_notice, cached_punish
 
+    # 2. 若無快取才爬注意/處置股
     try:
-        # 爬注意股
         url_notice = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res = requests.get(url_notice, timeout=10, headers=headers_base, verify=False).json()
         if res.get('stat') == 'OK' and res.get('data'):
             notice_set = smart_extract_codes_to_set(res['data'])
         
-        # 爬處置股
         url_punish = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res = requests.get(url_punish, timeout=10, headers=headers_base, verify=False).json()
         if res.get('stat') == 'OK' and res.get('data'):
             raw_data = res['data']
             code_idx, time_idx = -1, -1
-            # 尋找代號與時間欄位
             for i, col in enumerate(raw_data[0]):
                 val = str(col).strip()
                 if re.match(r'^\d{4}', val): code_idx = i
@@ -161,10 +142,10 @@ def get_official_market_data(target_date):
         
         save_market_data_to_cache(date_str, notice_set, punish_db)
     except: pass
-    return chips_db, notice_set, punish_db
+    return notice_set, punish_db
 
 # --- 6. UI 與 顯示邏輯 ---
-st.title("🚨 異常注意警示股雷達 (全面升級版)")
+st.title("🚨 異常注意警示股雷達")
 st.divider()
 
 col1, col2, col3 = st.columns([1, 1, 1])
@@ -176,22 +157,22 @@ with col3:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     start_btn = st.button("🚀 開始連線查核", width='stretch')
 
-# 我的持股清單 (供高亮顯示)
+# 持股高亮清單
 my_stocks = ['6548', '3297', '1815', '8112', '0050', '2492']
 
 if start_btn:
     yf_tickers_all, info_map = get_all_stock_tickers()
     target_tickers = yf_tickers_all if scan_mode == "全市場自動掃描 (推薦)" else []
     
-    with st.spinner("查詢官方數據與籌碼中..."):
-        chips_db, notice_set, punish_db = get_official_market_data(target_date)
+    with st.spinner("查詢官方公告中..."):
+        notice_set, punish_db = get_official_market_data(target_date)
 
     all_results = []
     chunk_size = 50
     yf_start = target_date - datetime.timedelta(days=45)
     yf_end = target_date + datetime.timedelta(days=1)
 
-    with st.spinner(f"正在分析 {len(target_tickers)} 檔標的之技術指標..."):
+    with st.spinner(f"正在分析 {len(target_tickers)} 檔標的技術指標..."):
         for i in range(0, len(target_tickers), chunk_size):
             chunk = target_tickers[i:i+chunk_size]
             try:
@@ -219,17 +200,13 @@ if start_btn:
                             if six_day_change >= 25: warning = "🚨達注意標準"
                             elif six_day_change >= 22: warning = "⚠️即將注意"
                         
-                        # 過濾條件：只顯示異常或注意的標的
                         if status == "一般" and warning == "正常": continue
 
                         all_results.append({
                             "代碼": code, "名稱": info_map.get(ticker, {}).get("名稱", "未知"),
                             "狀態": status, "分盤": match_time, "預警": warning,
                             "收盤": round(close, 2), "單日漲幅%": round(change_pct, 2),
-                            "6日累計漲幅%": round(six_day_change, 2),
-                            "外資": chips_db.get(code, {}).get("外資", 0),
-                            "投信": chips_db.get(code, {}).get("投信", 0),
-                            "處置期間": punish_period
+                            "6日累計漲幅%": round(six_day_change, 2), "處置期間": punish_period
                         })
                     except: continue
             except: pass
@@ -237,20 +214,18 @@ if start_btn:
     if all_results:
         df_final = pd.DataFrame(all_results)
         
-        # 1. 排序權重 (處置>注意>預警)
+        # 1. 排序：處置 > 注意 > 累計漲幅
         df_final['weight'] = df_final['狀態'].map({'🚫處置股': 3, '📢注意股': 2, '一般': 1})
         df_final = df_final.sort_values(by=['weight', '6日累計漲幅%'], ascending=[False, False]).drop(columns=['weight'])
 
-        # 2. 定義樣式
+        # 2. 定義 CSS 渲染 (包含持股高亮)
         def custom_style(row):
             styles = []
             is_mine = row['代碼'] in my_stocks
             for col in row.index:
-                # 基礎樣式與持股高亮 (深藍色底)
                 base_css = "font-size: 18px; text-align: center; padding: 12px; border-bottom: 1px solid #444;"
                 if is_mine: base_css += "background-color: #1A237E; color: #FFF; border: 2px solid #FFD700;"
                 
-                # 狀態與顏色渲染
                 if col == '狀態':
                     if row[col] == '🚫處置股': base_css += "color: white; background-color: #8B0000; font-weight: bold;"
                     elif row[col] == '📢注意股': base_css += "color: black; background-color: #FFD700; font-weight: bold;"
@@ -262,9 +237,7 @@ if start_btn:
                 styles.append(base_css)
             return styles
 
-        st.success(f"🔍 掃描完成！共發現 {len(df_final)} 檔異常標的")
-        
-        # 使用 HTML 渲染
+        st.success(f"🔍 掃描完成！發現 {len(df_final)} 檔標的")
         st.write(df_final.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
     else:
-        st.info("今日無異常注意/處置股。")
+        st.info("今日無異常。")
