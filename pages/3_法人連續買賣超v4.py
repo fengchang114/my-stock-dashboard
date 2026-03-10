@@ -6,13 +6,26 @@ import urllib3
 import io
 import time
 import datetime as dt
+from supabase import create_client, Client
 
+# 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="法人連續買賣超", layout="wide")
 
-# ==========================================
-# 產業代碼與工具函式
-# ==========================================
+# --- 1. 初始化 Supabase ---
+@st.cache_resource
+def init_supabase() -> Client:
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error("❌ 找不到 Supabase Secrets 設定，請檢查 Streamlit Cloud 設定。")
+        st.stop()
+
+supabase = init_supabase()
+
+# --- 2. 產業代碼與工具函式 ---
 INDUSTRY_CODE_MAP = {
     "01": "水泥工業", "02": "食品工業", "03": "塑膠工業", "04": "紡織纖維",
     "05": "電機機械", "06": "電器電纜", "07": "化學生技醫療", "08": "玻璃陶瓷",
@@ -26,261 +39,203 @@ INDUSTRY_CODE_MAP = {
     "37": "運動休閒", "38": "居家生活", "80": "管理股票", "91": "存託憑證",
 }
 
-def convert_to_float(val):
-    try:
-        val_str = str(val).strip()
-        if val_str in ['-', '', 'nan', 'None']: return 0.0
-        return float(val_str.replace(',', ''))
-    except: return 0.0
-
 @st.cache_data(ttl=86400)
-def get_market_stocks():
-    """獲取全市場股票清單，並直接排除 ETF、權證與 -KY"""
-    stocks = {}
+def get_industry_map():
+    industry_map = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    # 抓取上市
     try:
-        res = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=5).json()
-        for row in res:
-            code = row.get('公司代號', '').strip()
-            name = row.get('公司簡稱', '').strip()
-            ind = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
-            if not code.startswith('00') and len(code) < 6 and 'KY' not in name:
-                stocks[code] = {'name': name, 'industry': ind, 'market': '上市'}
+        res = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=5)
+        for row in res.json(): industry_map[row.get('公司代號', '').strip()] = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/t187ap03_O", headers=headers, verify=False, timeout=5)
+        for row in res.json(): industry_map[row.get('公司代號', '').strip()] = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
     except: pass
-    
-    # 抓取上櫃
-    try:
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/t187ap03_O", headers=headers, verify=False, timeout=5).json()
-        for row in res:
-            code = row.get('公司代號', '').strip()
-            name = row.get('公司簡稱', '').strip()
-            ind = INDUSTRY_CODE_MAP.get(row.get('產業別', ''), '其他')
-            if not code.startswith('00') and len(code) < 6 and 'KY' not in name:
-                stocks[code] = {'name': name, 'industry': ind, 'market': '上櫃'}
-    except: pass
-    return stocks
+    return industry_map
 
-@st.cache_data(ttl=3600)
-def get_fundamental_data(target_date):
-    fundamental_dict = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
+# --- 3. Supabase 單日籌碼快取邏輯 ---
+def get_daily_chips_from_cache(date_str):
+    try:
+        res = supabase.table("daily_chips_cache").select("stock_id, stock_name, foreign_buy, it_buy").eq("date", date_str).execute()
+        if res.data and len(res.data) > 500: # 確保資料量完整
+            df = pd.DataFrame(res.data)
+            df.columns = ['代號', '名稱', '外資', '投信']
+            return df
+    except: pass
+    return None
+
+def save_daily_chips_to_cache(date_str, df_daily):
+    data_to_insert = []
+    for _, row in df_daily.iterrows():
+        data_to_insert.append({
+            "date": date_str, "stock_id": str(row['代號']), "stock_name": str(row['名稱']),
+            "foreign_buy": int(row['外資']), "it_buy": int(row['投信'])
+        })
+    # 分批寫入 (每 500 筆一次)
+    if data_to_insert:
+        for i in range(0, len(data_to_insert), 500):
+            try:
+                supabase.table("daily_chips_cache").insert(data_to_insert[i:i+500]).execute()
+            except: pass
+
+# --- 4. 爬蟲抓取單日籌碼 ---
+def fetch_one_day_chips(target_date):
+    date_str_db = target_date.strftime('%Y-%m-%d')
     date_str_twse = target_date.strftime('%Y%m%d')
-    try:
-        res = requests.get(f"https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d?date={date_str_twse}&selectType=ALL&response=json", headers=headers, verify=False).json()
-        if res.get('stat') == 'OK':
-            for row in res['data']:
-                fundamental_dict[str(row[0]).strip()] = {'pe': convert_to_float(row[5]), 'pb': convert_to_float(row[6])}
-    except: pass
-
     roc_year = target_date.year - 1911
     date_str_tpex = f"{roc_year}/{target_date.strftime('%m/%d')}"
-    try:
-        res = requests.get(f"https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={date_str_tpex}", headers=headers, verify=False).json()
-        raw = res.get('tables', [{}])[0].get('data', []) or res.get('aaData', [])
-        for row in raw:
-            fundamental_dict[str(row[0]).strip()] = {'pe': convert_to_float(row[2]), 'pb': convert_to_float(row[6])}
-    except: pass
-    return fundamental_dict
-
-def get_chip_history(base_date, days_to_fetch=25):
-    daily_data, fetched_days, attempts = {}, 0, 0
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    progress_bar = st.progress(0, text="正在回推下載籌碼歷史數據...")
+    # 優先查快取
+    cached = get_daily_chips_from_cache(date_str_db)
+    if cached is not None:
+        return cached
 
-    while fetched_days < days_to_fetch and attempts < 60:
-        target_date = base_date - dt.timedelta(days=attempts)
-        attempts += 1
-        if target_date.weekday() > 4: continue
+    # 沒快取才爬
+    try:
+        # TWSE
+        url_l = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str_twse}&selectType=ALL&response=json"
+        res_l = requests.get(url_l, headers=headers, verify=False, timeout=10).json()
+        df_l = pd.DataFrame(res_l['data'], columns=res_l['fields']).iloc[:, [0, 1, 4, 10]] if res_l.get('stat') == 'OK' else pd.DataFrame()
         
-        date_str_twse = target_date.strftime('%Y%m%d')
-        roc_year = target_date.year - 1911
-        date_str_tpex = f"{roc_year}/{target_date.strftime('%m/%d')}"
-        date_display = target_date.strftime('%Y-%m-%d')
+        # TPEX
+        url_o = f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={date_str_tpex}"
+        res_o = requests.get(url_o, headers=headers, verify=False, timeout=10).json()
+        raw_o = res_o.get('aaData') or []
+        df_o = pd.DataFrame(raw_o).iloc[:, [0, 1, 10, 13]] if raw_o else pd.DataFrame()
         
-        progress_bar.progress((fetched_days + 1) / days_to_fetch, text=f"正在獲取 {date_display} 籌碼...")
+        if df_l.empty and df_o.empty: return None
         
-        day_chips, has_data = {}, False
-        try:
-            res_twse = requests.get(f"https://www.twse.com.tw/rwd/zh/fund/T86?date={date_str_twse}&selectType=ALL&response=json", timeout=5, verify=False, headers=headers).json()
-            if res_twse.get('stat') == 'OK':
-                has_data = True
-                idx_f = next((i for i, f in enumerate(res_twse['fields']) if '外陸資買賣超股數' in f), 4)
-                idx_t = next((i for i, f in enumerate(res_twse['fields']) if '投信買賣超股數' in f), 10)
-                for row in res_twse['data']:
-                    try: day_chips[row[0]] = {'f': int(row[idx_f].replace(',', '')) // 1000, 't': int(row[idx_t].replace(',', '')) // 1000}
-                    except: pass
-            
-            res_tpex = requests.get(f"https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=json&se=AL&t=D&d={date_str_tpex}", timeout=5, verify=False, headers=headers).json()
-            rows = res_tpex.get('aaData', []) or res_tpex.get('tables', [{}])[0].get('data', [])
-            if rows:
-                has_data = True
-                for row in rows:
-                    try: day_chips[row[0]] = {'f': int(row[10].replace(',', '')) // 1000, 't': int(row[13].replace(',', '')) // 1000}
-                    except: pass
-                    
-            if has_data:
-                daily_data[date_display] = day_chips
-                fetched_days += 1
-            time.sleep(0.2)
-        except: pass
+        df_combined = pd.concat([df_l, df_o], ignore_index=True)
+        df_combined.columns = ['代號', '名稱', '外資', '投信']
+        for col in ['外資', '投信']:
+            df_combined[col] = pd.to_numeric(df_combined[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0).astype(int) // 1000
         
-    progress_bar.empty()
-    sorted_dates = sorted(daily_data.keys(), reverse=True)
-    chips_history = {}
-    all_codes = set()
-    for d in daily_data: all_codes.update(daily_data[d].keys())
+        # 存入快取
+        save_daily_chips_to_cache(date_str_db, df_combined)
+        return df_combined
+    except: return None
+
+# ==========================================
+# 5. 主程式介面
+# ==========================================
+st.title("🔥 法人連續買賣超 (Supabase 快取版)")
+st.markdown("自動比對多日籌碼，找出土洋同步連買/連賣的強勢與弱勢股。")
+st.divider()
+
+with st.sidebar:
+    lookback = st.slider("分析最近交易日天數", 3, 10, 5)
+    min_vol = st.number_input("最低成交量 (張)", value=500)
+    start_analysis = st.button("🚀 開始分析", width='stretch')
+
+if start_analysis:
+    industry_map = get_industry_map()
+    all_days_chips = []
+    check_date = dt.date.today()
+    found_days = 0
+    
+    # 蒐集多日資料 (優先從 DB 撈)
+    with st.spinner(f"正在蒐集最近 {lookback} 個交易日的資料..."):
+        while found_days < lookback:
+            if check_date.weekday() < 5:
+                df_day = fetch_one_day_chips(check_date)
+                if df_day is not None:
+                    all_days_chips.append(df_day)
+                    found_days += 1
+                elif found_days == 0 and dt.datetime.now().hour < 18:
+                    pass # 若當日尚未收盤公告則跳過
+            check_date -= dt.timedelta(days=1)
+            if (dt.date.today() - check_date).days > 20: break # 安全閥
+
+    if len(all_days_chips) < lookback:
+        st.error(f"資料蒐集不足 (僅找到 {len(all_days_chips)} 天)，請確認日期或稍後再試。")
+        st.stop()
+
+    # --- 核心運算：計算連續天數 ---
+    base_df = all_days_chips[0].copy()
+    all_codes = base_df['代號'].unique()
+    streak_results = []
+
     for code in all_codes:
-        chips_history[code] = [daily_data[d].get(code, {'f': 0, 't': 0}) for d in sorted_dates]
-    return chips_history
-
-def calculate_streaks(history_list):
-    f_buy = f_sell = t_buy = t_sell = 0
-    for day in history_list:
-        if day['f'] > 0: f_buy += 1
-        else: break
-    for day in history_list:
-        if day['f'] < 0: f_sell += 1
-        else: break
-    for day in history_list:
-        if day['t'] > 0: t_buy += 1
-        else: break
-    for day in history_list:
-        if day['t'] < 0: t_sell += 1
-        else: break
-    return f_buy, f_sell, t_buy, t_sell
-
-# ==========================================
-# 網頁主程式
-# ==========================================
-st.title("🔥 法人連續買賣超全市場掃描")
-st.markdown("自動掃描全市場，並已**排除 ETF、權證與 -KY 股**。")
-
-# --- 將選項移至主畫面 ---
-col1, col2 = st.columns([1, 3])
-with col1:
-    target_date = st.date_input("選擇查詢日期", dt.date.today())
-    run_btn = st.button("🚀 開始全市場掃描", use_container_width=True)
-
-if run_btn:
-    with st.spinner("正在取得全市場股票清單..."):
-        market_stocks = get_market_stocks()
+        f_streak, t_streak = 0, 0
+        f_stop, t_stop = False, False
         
-    fund_data = get_fundamental_data(target_date)
-    chips_history = get_chip_history(target_date, days_to_fetch=25)
-    
-    st.info(f"已載入 {len(market_stocks)} 檔純個股，開始運算連續籌碼...")
-    
-    # --- 效能優化：只抓取有連續買賣超的股票股價 ---
-    active_codes = []
-    stock_streaks = {}
-    
-    for code, info in market_stocks.items():
-        history = chips_history.get(code, [])
-        f_buy, f_sell, t_buy, t_sell = calculate_streaks(history)
-        max_buy = max(f_buy, t_buy)
-        max_sell = max(f_sell, t_sell)
+        for i in range(lookback):
+            df_i = all_days_chips[i]
+            row = df_i[df_i['代號'] == code]
+            if row.empty: break
+            f_val, t_val = row.iloc[0]['外資'], row.iloc[0]['投信']
+            
+            # 外資連買/連賣邏輯
+            if not f_stop:
+                if i == 0: f_mode = 1 if f_val > 0 else (-1 if f_val < 0 else 0)
+                if f_mode == 1 and f_val > 0: f_streak += 1
+                elif f_mode == -1 and f_val < 0: f_streak -= 1
+                else: f_stop = True
+            
+            # 投信連買/連賣邏輯
+            if not t_stop:
+                if i == 0: t_mode = 1 if t_val > 0 else (-1 if t_val < 0 else 0)
+                if t_mode == 1 and t_val > 0: t_streak += 1
+                elif t_mode == -1 and t_val < 0: t_streak -= 1
+                else: t_stop = True
         
-        # 只要法人有動作(>0)，才加入 yfinance 下載清單
-        if max_buy > 0 or max_sell > 0:
-            active_codes.append(code)
-            stock_streaks[code] = {
-                'f_buy': f_buy, 'f_sell': f_sell, 
-                't_buy': t_buy, 't_sell': t_sell,
-                'max_buy': max_buy, 'max_sell': max_sell,
-                'last_chip': history[0] if history else {'f': 0, 't': 0}
-            }
+        if f_streak != 0 or t_streak != 0:
+            streak_results.append({'代號': code, '外資連買': f_streak, '投信連買': t_streak})
 
-    yf_tickers = []
-    for code in active_codes:
-        suffix = ".TWO" if market_stocks[code]['market'] == '上櫃' else ".TW"
-        yf_tickers.append(f"{code}{suffix}")
-
-    price_data = {}
-    with st.spinner(f"正在透過 yfinance 下載 {len(yf_tickers)} 檔活躍個股股價與均量..."):
-        data = yf.download(yf_tickers, period="2mo", group_by='ticker', threads=True, progress=False, auto_adjust=True)
-        for ticker in yf_tickers:
-            df = data if len(yf_tickers) == 1 else data.get(ticker, pd.DataFrame())
-            if not df.empty:
-                df.index = pd.to_datetime(df.index).normalize()
-                df = df[df.index <= pd.Timestamp(target_date)]
-                if len(df) > 20: 
-                    price_data[ticker.split('.')[0]] = df
-
-    # --- 整理報表 ---
-    buy_list, sell_list = [], []
+    # --- 技術指標運算 (yfinance) ---
+    final_list = []
+    streak_df = pd.DataFrame(streak_results)
+    merged_main = pd.merge(base_df, streak_df, on='代號')
     
-    for code in active_codes:
-        info = market_stocks[code]
-        streak_info = stock_streaks[code]
+    # 過濾：只留下有連續買或賣的股票
+    filtered_main = merged_main[(merged_main['外資連買'].abs() >= 2) | (merged_main['投信連買'].abs() >= 2)]
+    
+    with st.spinner(f"正在分析 {len(filtered_main)} 檔標的之技術面..."):
+        chunk_size = 40
+        for j in range(0, len(filtered_main), chunk_size):
+            chunk_df = filtered_main.iloc[j:j+chunk_size]
+            tickers = [f"{c}.TW" if len(c)==4 else f"{c}.TWO" for c in chunk_df['代號']] # 簡化判斷
+            try:
+                yf_data = yf.download(tickers, period="1mo", group_by='ticker', progress=False, threads=True)
+                for _, row in chunk_df.iterrows():
+                    code = row['代號']
+                    t_yf = f"{code}.TW" if f"{code}.TW" in yf_data else f"{code}.TWO"
+                    try:
+                        df_h = yf_data[t_yf].dropna()
+                        if len(df_h) < 2: continue
+                        last_c = df_h['Close'].iloc[-1]
+                        prev_c = df_h['Close'].iloc[-2]
+                        vol = df_h['Volume'].iloc[-1] // 1000
+                        if vol < min_vol: continue
+                        
+                        change_p = ((last_c - prev_c) / prev_c) * 100
+                        
+                        # 判斷說明文字
+                        desc = ""
+                        f_s, t_s = row['外資連買'], row['投信連買']
+                        if f_s > 0 and t_s > 0: desc = f"土洋同買 (外{f_s}/投{t_s})"
+                        elif f_s < 0 and t_s < 0: desc = f"土洋同賣 (外{abs(f_s)}/投{abs(t_s)})"
+                        elif f_s > 0: desc = f"外資連買 {f_s} 天"
+                        elif t_s > 0: desc = f"投信連買 {t_s} 天"
+                        
+                        final_list.append({
+                            "代號": code, "名稱": row['名稱'], "產業別": industry_map.get(code, "其他"),
+                            "收盤": round(last_c, 2), "漲幅%": round(change_p, 2), "成交量": vol,
+                            "外資": row['外資'], "投信": row['投信'],
+                            "連續天數": max(abs(f_s), abs(t_s)), "詳細說明": desc
+                        })
+                    except: continue
+            except: pass
+
+    # --- 渲染結果 ---
+    if final_list:
+        df_res = pd.DataFrame(final_list)
+        tab_buy, tab_sell = st.tabs(["🚀 法人連買排行", "🔻 法人連賣排行"])
         
-        df = price_data.get(code, pd.DataFrame())
-        close = change = vol = vol_ma5 = ma20 = 0
-        if not df.empty:
-            last_row = df.iloc[-1]
-            close = round(last_row['Close'], 2) if pd.notna(last_row['Close']) else 0
-            ma20 = round(df['Close'].rolling(20).mean().iloc[-1], 2)
-            vol = int(last_row['Volume'] // 1000)
-            vol_ma5 = int(df['Volume'].rolling(5).mean().iloc[-1] // 1000)
-            if len(df) >= 2 and df['Close'].iloc[-2] > 0:
-                change = round(((close - df['Close'].iloc[-2]) / df['Close'].iloc[-2]) * 100, 2)
-
-        pe_val = fund_data.get(code, {}).get('pe', 0.0)
-        pb_val = fund_data.get(code, {}).get('pb', 0.0)
-        nav_val = round(close / pb_val, 2) if pb_val > 0 else 0.0
-
-        row_base = {
-            "代號": code, 
-            "名稱": info['name'], 
-            "產業別": info['industry'], 
-            "收盤": close, 
-            "漲幅%": change,
-            "成交量": vol, 
-            "5日均量": vol_ma5, 
-            "本益比": pe_val, 
-            "股價淨值比": pb_val,
-            "每股淨值": nav_val, 
-            "MA20": ma20, 
-            "外資": streak_info['last_chip']['f'], 
-            "投信": streak_info['last_chip']['t']
-        }
-
-        if streak_info['max_buy'] > 0:
-            r = row_base.copy()
-            f_buy, t_buy = streak_info['f_buy'], streak_info['t_buy']
-            if f_buy > 0 and t_buy > 0: desc = f"土洋同步連買 (外{f_buy}/投{t_buy})"
-            elif f_buy > t_buy: desc = f"外資連買 {f_buy} 天"
-            else: desc = f"投信連買 {t_buy} 天"
-            r["連續天數"], r["詳細說明"] = streak_info['max_buy'], desc
-            buy_list.append(r)
-
-        if streak_info['max_sell'] > 0:
-            r = row_base.copy()
-            f_sell, t_sell = streak_info['f_sell'], streak_info['t_sell']
-            if f_sell > 0 and t_sell > 0: desc = f"土洋同步連賣 (外{f_sell}/投{t_sell})"
-            elif f_sell > t_sell: desc = f"外資連賣 {f_sell} 天"
-            else: desc = f"投信連賣 {t_sell} 天"
-            r["連續天數"], r["詳細說明"] = streak_info['max_sell'], desc
-            sell_list.append(r)
-
-    cols_order = ["代號", "名稱", "產業別", "收盤", "漲幅%", "成交量", "5日均量", "本益比", "股價淨值比", "每股淨值", "MA20", "外資", "投信", "連續天數", "詳細說明"]
-    df_buy = pd.DataFrame(buy_list)[cols_order].sort_values(by="連續天數", ascending=False) if buy_list else pd.DataFrame(columns=cols_order)
-    df_sell = pd.DataFrame(sell_list)[cols_order].sort_values(by="連續天數", ascending=False) if sell_list else pd.DataFrame(columns=cols_order)
-
-    st.divider()
-    st.success("✅ 全市場分析完成！")
-    tab_buy, tab_sell = st.tabs(["🔥 連續買超清單", "🧊 連續賣超清單"])
-    with tab_buy: st.dataframe(df_buy, hide_index=True, use_container_width=True)
-    with tab_sell: st.dataframe(df_sell, hide_index=True, use_container_width=True)
-
-    # --- 下載按鈕也移回主畫面底部 ---
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_buy.to_excel(writer, sheet_name='法人連續買超', index=False)
-        df_sell.to_excel(writer, sheet_name='法人連續賣超', index=False)
-    output.seek(0)
-    
-    st.download_button("📥 下載結果報表 (Excel)", data=output, file_name=f"{target_date}_法人連續買賣超.xlsx", type="primary")
+        with tab_buy:
+            df_b = df_res[df_res['詳細說明'].str.contains('買')].sort_values('連續天數', ascending=False)
+            st.dataframe(df_b, width='stretch', hide_index=True)
+        with tab_sell:
+            df_s = df_res[df_res['詳細說明'].str.contains('賣')].sort_values('連續天數', ascending=False)
+            st.dataframe(df_s, width='stretch', hide_index=True)
+    else:
+        st.warning("查無符合條件之標的。")
