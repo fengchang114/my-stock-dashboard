@@ -70,7 +70,7 @@ def fetch_official_announcements(target_date):
                     m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
                     period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
                     punish_db[code] = {"期間": period, "分盤": m_time}
-    except Exception as e:
+    except Exception:
         st.toast("⚠️ 證交所資料讀取受阻")
 
     # --- B. 櫃買中心 OpenAPI (上櫃) ---
@@ -83,7 +83,6 @@ def fetch_official_announcements(target_date):
             
             period = str(row.get("DispositionPeriod", ""))
             is_active = False
-            # 日期區間判定
             if "~" in period or "～" in period:
                 parts = re.split(r'[~～]', period)
                 if len(parts) >= 2:
@@ -105,16 +104,14 @@ def fetch_official_announcements(target_date):
             if str(row.get("Date")) == roc_date_str:
                 code = str(row.get("SecuritiesCompanyCode", "")).strip()
                 if re.match(r'^\d{4}$', code): notice_set.add(code)
-    except Exception as e:
+    except Exception:
         st.toast("⚠️ 櫃買中心 OpenAPI 連線失敗")
 
     return notice_set, punish_db
 
-# 🌟 修正重點：雙重保險獲取股票身分
 @st.cache_data(ttl=86400)
 def get_stock_info_map():
     info_map = {}
-    # 第一層：離線字典 (保證絕對抓得到上櫃身分)
     for code, info in twstock.codes.items():
         if info.type == '股票':
             info_map[code] = {
@@ -123,16 +120,13 @@ def get_stock_info_map():
                 "市場": "上市" if info.market == "上市" else "上櫃"
             }
             
-    # 第二層：線上更新 (抓取最新上市櫃名單)
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         r_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=5).json()
         for r in r_l: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TW", "市場": "上市"}
-        # 正確的上櫃 API 路徑
         r_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", headers=headers, verify=False, timeout=5).json()
         for r in r_o: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TWO", "市場": "上櫃"}
     except: pass
-    
     return info_map
 
 # ==========================================
@@ -140,7 +134,6 @@ def get_stock_info_map():
 # ==========================================
 st.title("🚨 上市 / 上櫃 警示股監測")
 
-# 🌟 UI 改良：加入清除快取按鈕
 col1, col2 = st.columns([3, 1])
 with col1:
     target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
@@ -151,7 +144,7 @@ with col2:
         try:
             supabase.table("warning_stocks_cache").delete().eq("date", date_str).execute()
             st.success("快取已清除！請點擊下方同步按鈕。")
-        except Exception as e:
+        except:
             st.error("清除失敗")
 
 start_btn = st.button("🚀 執行公告同步", width='stretch', type="primary")
@@ -171,34 +164,40 @@ if start_btn:
         codes = list(set(list(notice_set) + list(punish_db.keys())))
         all_results = []
         if codes:
-            # 確保代碼有加上正確的後綴
-            tickers = [f"{c}{info_map.get(c, {'suffix':'.TW'})['suffix']}" for c in codes]
+            tickers = [f"{c}{info_map.get(c, {'suffix':'.TWO'})['suffix']}" for c in codes] # 找不到預設給上櫃
             data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
             
             for c in codes:
-                try:
-                    # 這裡如果還是找不到，預設給上市 (防呆機制)
-                    market_info = info_map.get(c, {'suffix':'.TW', '名稱':'未知', '市場':'上市'})
-                    ticker = f"{c}{market_info['suffix']}"
-                    
-                    df = data[ticker].dropna() if len(tickers) > 1 else data.dropna()
-                    if len(df) < 2: continue # 避免新上市股票資料不足報錯
-                    
-                    last_c, prev_c = df.iloc[-1]['Close'], df.iloc[-2]['Close']
-                    six_day_c = df.iloc[-7]['Close'] if len(df) >= 7 else df.iloc[0]['Close']
-                    
-                    status, m_time, p_period = "一般", "-", ""
-                    if c in punish_db: status, m_time, p_period = "🚫處置股", punish_db[c]["分盤"], punish_db[c]["期間"]
-                    elif c in notice_set: status = "📢注意股"
-                    
-                    all_results.append({
-                        "市場": market_info['市場'],
-                        "代碼": c, "名稱": market_info['名稱'], "狀態": status,
-                        "分盤": m_time, "收盤": round(last_c, 2),
-                        "單日漲幅%": round(((last_c-prev_c)/prev_c)*100, 2),
-                        "6日累計漲幅%": round(((last_c-six_day_c)/six_day_c)*100, 2), "處置期間": p_period
-                    })
-                except: continue
+                # 🌟 絕對不剔除機制
+                market_info = info_map.get(c, {'suffix':'.TWO', '名稱':c, '市場':'上櫃'}) # 若真找不到資訊，預設歸類為上櫃
+                ticker = f"{c}{market_info['suffix']}"
+                
+                # 初始化空值
+                last_c, day_change, six_change = "-", "-", "-"
+                
+                if ticker in data and not data[ticker].dropna().empty:
+                    df = data[ticker].dropna()
+                    if len(df) >= 2:
+                        last_c = round(df.iloc[-1]['Close'], 2)
+                        prev_c = df.iloc[-2]['Close']
+                        six_day_c = df.iloc[-7]['Close'] if len(df) >= 7 else df.iloc[0]['Close']
+                        day_change = round(((last_c-prev_c)/prev_c)*100, 2)
+                        six_change = round(((last_c-six_day_c)/six_day_c)*100, 2)
+                    elif len(df) == 1:
+                        last_c = round(df.iloc[-1]['Close'], 2)
+
+                status, m_time, p_period = "一般", "-", ""
+                if c in punish_db: status, m_time, p_period = "🚫處置股", punish_db[c]["分盤"], punish_db[c]["期間"]
+                elif c in notice_set: status = "📢注意股"
+                
+                # 永遠無條件加入名單
+                all_results.append({
+                    "市場": market_info['市場'],
+                    "代碼": c, "名稱": market_info['名稱'], "狀態": status,
+                    "分盤": m_time, "收盤": last_c,
+                    "單日漲幅%": day_change,
+                    "6日累計漲幅%": six_change, "處置期間": p_period
+                })
 
         if all_results:
             df_final = pd.DataFrame(all_results)
