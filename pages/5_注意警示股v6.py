@@ -18,7 +18,7 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# --- 2. 雲端資料庫邏輯 ---
+# --- 2. 雲端資料庫邏輯 (維持不變) ---
 def get_market_data_from_cache(date_str):
     try:
         res = supabase.table("warning_stocks_cache").select("*").eq("date", date_str).execute()
@@ -41,61 +41,70 @@ def save_market_data_to_cache(date_str, notice_set, punish_db):
         try: supabase.table("warning_stocks_cache").insert(data_to_insert).execute()
         except: pass
 
-# --- 3. 核心抓取邏輯 (新增櫃買中心來源) ---
+# --- 3. 核心抓取邏輯 (分開處理上市櫃，避免連鎖錯誤) ---
 def fetch_official_announcements(target_date):
     today_str_twse = target_date.strftime('%Y%m%d')
-    # 櫃買中心日期格式為 民國/月/日 (115/03/11)
     roc_year = target_date.year - 1911
     today_str_tpex = f"{roc_year}/{target_date.strftime('%m/%d')}"
-    
     headers = {'User-Agent': 'Mozilla/5.0'}
     notice_set, punish_db = set(), {}
-    
+
+    # --- A. 證交所部分 (上市) ---
     try:
-        # --- A1. 證交所 (上市) ---
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
-        res_n = requests.get(url_n, timeout=10, headers=headers, verify=False).json()
-        if res_n.get('stat') == 'OK':
-            for row in res_n['data']:
-                for item in row:
-                    val = str(item).strip()
-                    if re.match(r'^\d{4}$', val): notice_set.add(val); break
-
+        res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
+        if res_n.status_code == 200:
+            data_n = res_n.json()
+            if data_n.get('stat') == 'OK':
+                for row in data_n['data']:
+                    for item in row:
+                        val = str(item).strip()
+                        if re.match(r'^\d{4}$', val): notice_set.add(val); break
+        
         url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
-        res_p = requests.get(url_p, timeout=10, headers=headers, verify=False).json()
-        if res_p.get('stat') == 'OK' and res_p.get('data'):
-            for row in res_p['data']:
-                row_str = " ".join(str(item) for item in row)
-                code_match = re.search(r'(\d{4})', row_str)
-                if code_match:
-                    code = code_match.group(1)
-                    m_time = "20分" if "20分" in row_str or "二十分" in row_str else \
-                             ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
-                    period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
-                    punish_db[code] = {"期間": period, "分盤": m_time}
-
-        # --- A2. 櫃買中心 (上櫃) ---
-        # 櫃買處置股公告
-        url_tpex_p = f"https://www.tpex.org.tw/web/stock/margin_trading/disposal/disposal_result.php?l=zh-tw&d={today_str_tpex}&o=json"
-        res_tp = requests.get(url_tpex_p, timeout=10, headers=headers, verify=False).json()
-        if res_tp.get('aaData'):
-            for row in res_tp['aaData']:
-                code = str(row[0]).strip()
-                m_time = "20分" if "20分" in str(row[2]) else ("45分" if "45分" in str(row[2]) else "5分")
-                punish_db[code] = {"期間": str(row[1]), "分盤": m_time}
-
-        # 櫃買注意股公告
-        url_tpex_n = f"https://www.tpex.org.tw/web/stock/margin_trading/attention/attention_result.php?l=zh-tw&d={today_str_tpex}&o=json"
-        res_tn = requests.get(url_tpex_n, timeout=10, headers=headers, verify=False).json()
-        if res_tn.get('aaData'):
-            for row in res_tn['aaData']:
-                notice_set.add(str(row[0]).strip())
-
+        res_p = requests.get(url_p, timeout=10, headers=headers, verify=False)
+        if res_p.status_code == 200:
+            data_p = res_p.json()
+            if data_p.get('stat') == 'OK' and data_p.get('data'):
+                for row in data_p['data']:
+                    row_str = " ".join(str(item) for item in row)
+                    code_match = re.search(r'(\d{4})', row_str)
+                    if code_match:
+                        code = code_match.group(1)
+                        m_time = "20分" if "20分" in row_str else ("45分" if "45分" in row_str else "5分")
+                        period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
+                        punish_db[code] = {"期間": period, "分盤": m_time}
     except Exception as e:
-        st.error(f"公告抓取失敗: {e}")
+        st.toast(f"⚠️ 證交所資料讀取受阻")
+
+    # --- B. 櫃買中心部分 (上櫃) - 增加錯誤攔截 ---
+    try:
+        # 處置股
+        url_tpex_p = f"https://www.tpex.org.tw/web/stock/margin_trading/disposal/disposal_result.php?l=zh-tw&d={today_str_tpex}&o=json"
+        res_tp = requests.get(url_tpex_p, timeout=10, headers=headers, verify=False)
+        if res_tp.status_code == 200 and len(res_tp.text) > 10:
+            data_tp = res_tp.json()
+            if data_tp.get('aaData'):
+                for row in data_tp['aaData']:
+                    code = str(row[0]).strip()
+                    m_time = "20分" if "20分" in str(row[2]) else ("45分" if "45分" in str(row[2]) else "5分")
+                    punish_db[code] = {"期間": str(row[1]), "分盤": m_time}
+
+        # 注意股
+        url_tpex_n = f"https://www.tpex.org.tw/web/stock/margin_trading/attention/attention_result.php?l=zh-tw&d={today_str_tpex}&o=json"
+        res_tn = requests.get(url_tpex_n, timeout=10, headers=headers, verify=False)
+        if res_tn.status_code == 200 and len(res_tn.text) > 10:
+            data_tn = res_tn.json()
+            if data_tn.get('aaData'):
+                for row in data_tn['aaData']:
+                    notice_set.add(str(row[0]).strip())
+    except Exception:
+        # 櫃買中心 API 較不穩定，失敗時不報錯，僅以 toast 提示
+        st.toast("ℹ️ 櫃買中心 API 無法連線，僅顯示上市資料")
         
     return notice_set, punish_db
 
+# --- 4. 股票資訊映射 (維持不變) ---
 @st.cache_data(ttl=86400)
 def get_stock_info_map():
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -109,28 +118,29 @@ def get_stock_info_map():
     return info_map
 
 # ==========================================
-# 4. 主流程與樣式 (維持 v10 規格)
+# 5. 主程式流程與渲染
 # ==========================================
-st.title("🚨 全市場處置 / 注意股監測")
+st.title("🚨 注意 / 處置股監測 (健壯修復版)")
 target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
-start_btn = st.button("🚀 同步上市櫃公告", width='stretch', type="primary")
+start_btn = st.button("🚀 執行公告同步", width='stretch', type="primary")
 
 if start_btn:
     date_str = target_date.strftime('%Y-%m-%d')
     info_map = get_stock_info_map()
     
-    with st.spinner("同步證交所與櫃買中心公告中..."):
+    with st.spinner("同步公告與下載行情中..."):
+        # 優先快取
         notice_set, punish_db = get_market_data_from_cache(date_str)
         if notice_set is None:
             notice_set, punish_db = fetch_official_announcements(target_date)
-            save_market_data_to_cache(date_str, notice_set, punish_db)
-            st.toast("📡 雲端資料庫已同步上市櫃數據")
-        else:
-            st.toast("✅ 從快取載入歷史數據")
-
+            # 只有在有抓到任何資料的情況下才存入快取，避免存入空白資料
+            if notice_set or punish_db:
+                save_market_data_to_cache(date_str, notice_set, punish_db)
+        
         codes = list(set(list(notice_set) + list(punish_db.keys())))
         all_results = []
         if codes:
+            # 建立 YF 查詢列表
             tickers = [f"{c}{info_map.get(c, {'suffix':'.TW'})['suffix']}" for c in codes]
             data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
             
@@ -138,8 +148,10 @@ if start_btn:
                 try:
                     ticker = f"{c}{info_map.get(c, {'suffix':'.TW'})['suffix']}"
                     df = data[ticker].dropna() if len(tickers) > 1 else data.dropna()
+                    
                     last_c, prev_c = df.iloc[-1]['Close'], df.iloc[-2]['Close']
                     six_day_c = df.iloc[-7]['Close'] if len(df) >= 7 else df.iloc[0]['Close']
+                    
                     status, m_time, p_period = "一般", "-", ""
                     if c in punish_db: status, m_time, p_period = "🚫處置股", punish_db[c]["分盤"], punish_db[c]["期間"]
                     elif c in notice_set: status = "📢注意股"
@@ -154,6 +166,7 @@ if start_btn:
 
         if all_results:
             df_final = pd.DataFrame(all_results)
+            # 排序與權重
             status_map, time_map = {'🚫處置股': 2, '📢注意股': 1}, {'45分': 45, '20分': 20, '5分': 5, '-': 0}
             df_final['s_w'] = df_final['狀態'].map(status_map).fillna(0)
             df_final['t_w'] = df_final['分盤'].map(time_map).fillna(0)
@@ -175,3 +188,5 @@ if start_btn:
                 return styles
 
             st.write(df_final.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
+        else:
+            st.info("該日期無資料或 API 暫時無法連線。")
