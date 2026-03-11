@@ -109,9 +109,11 @@ def fetch_official_announcements(target_date):
 
     return notice_set, punish_db
 
+# 🌟 核心修正：加入新股手動補丁
 @st.cache_data(ttl=86400)
 def get_stock_info_map():
     info_map = {}
+    # 1. 離線字典庫
     for code, info in twstock.codes.items():
         if info.type == '股票':
             info_map[code] = {
@@ -120,13 +122,30 @@ def get_stock_info_map():
                 "市場": "上市" if info.market == "上市" else "上櫃"
             }
             
+    # 2. 官方 OpenAPI 每日行情 (抓取最新上市櫃名單)
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         r_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=5).json()
         for r in r_l: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TW", "市場": "上市"}
-        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", headers=headers, verify=False, timeout=5).json()
+        
+        # 修正上櫃 API 路徑為 t187ap03_O
+        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/t187ap03_O", headers=headers, verify=False, timeout=5).json()
         for r in r_o: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TWO", "市場": "上櫃"}
     except: pass
+
+    # 3. 🆕 新股手動補丁 (針對剛轉上櫃、API 尚未建檔的標的)
+    patch_dict = {
+        '7728': '光焱科技',
+        '4749': '新應材',
+        '6907': '雅特力-KY',
+        '7751': '竑騰',
+        '7744': '崴寶',
+        '7717': '萊德光電-KY'
+    }
+    for code, name in patch_dict.items():
+        # 強制覆蓋寫入，保證名字絕對正確
+        info_map[code] = {"名稱": name, "suffix": ".TWO", "市場": "上櫃"}
+
     return info_map
 
 # ==========================================
@@ -164,15 +183,13 @@ if start_btn:
         codes = list(set(list(notice_set) + list(punish_db.keys())))
         all_results = []
         if codes:
-            tickers = [f"{c}{info_map.get(c, {'suffix':'.TWO'})['suffix']}" for c in codes] # 找不到預設給上櫃
+            tickers = [f"{c}{info_map.get(c, {'suffix':'.TWO'})['suffix']}" for c in codes]
             data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
             
             for c in codes:
-                # 🌟 絕對不剔除機制
-                market_info = info_map.get(c, {'suffix':'.TWO', '名稱':c, '市場':'上櫃'}) # 若真找不到資訊，預設歸類為上櫃
+                market_info = info_map.get(c, {'suffix':'.TWO', '名稱':c, '市場':'上櫃'})
                 ticker = f"{c}{market_info['suffix']}"
                 
-                # 初始化空值
                 last_c, day_change, six_change = "-", "-", "-"
                 
                 if ticker in data and not data[ticker].dropna().empty:
@@ -190,7 +207,6 @@ if start_btn:
                 if c in punish_db: status, m_time, p_period = "🚫處置股", punish_db[c]["分盤"], punish_db[c]["期間"]
                 elif c in notice_set: status = "📢注意股"
                 
-                # 永遠無條件加入名單
                 all_results.append({
                     "市場": market_info['市場'],
                     "代碼": c, "名稱": market_info['名稱'], "狀態": status,
