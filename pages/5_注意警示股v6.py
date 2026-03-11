@@ -223,7 +223,7 @@ if start_btn:
             styles = []
             is_mine = row['代碼'] in my_stocks
             for col in row.index:
-                base_css = "font-size: 18px; text-align: center; padding: 12px; border-bottom: 1px solid #444;"
+                base_css = "font-size: 16px; text-align: center; padding: 12px; border-bottom: 1px solid #444;"
                 if is_mine: base_css += "background-color: #1A237E; color: #FFF; border: 2px solid #FFD700;"
                 
                 if col == '狀態':
@@ -241,3 +241,4 @@ if start_btn:
         st.write(df_final.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
     else:
         st.info("今日無異常。")
+
