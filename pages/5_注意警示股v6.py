@@ -7,7 +7,6 @@ import datetime
 import urllib3
 import re
 import time
-from io import StringIO
 from supabase import create_client, Client
 
 # 基礎設定
@@ -21,17 +20,19 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# --- 2. 智慧解析與快取邏輯 ---
-def smart_extract_codes_to_set(data_list):
-    code_set = set()
-    if not data_list: return code_set
-    for row in data_list:
-        for item in row:
-            val = str(item).strip()
-            if re.match(r'^\d{4}$', val):
-                code_set.add(val)
-                break
-    return code_set
+# --- 2. 核心抓取邏輯：移除 twstock.__update_codes() 改用穩定來源 ---
+@st.cache_data(ttl=86400)
+def get_all_tickers_safe():
+    """安全地獲取代碼清單，避免 SSLError"""
+    yf_tickers, info_map = [], {}
+    # 直接讀取 twstock 內建代碼 (不更新)
+    for code, info in twstock.codes.items():
+        if info.type == '股票':
+            suffix = ".TWO" if info.market == '上櫃' else ".TW"
+            ticker = f"{code}{suffix}"
+            yf_tickers.append(ticker)
+            info_map[code] = {"名稱": info.name, "ticker": ticker}
+    return yf_tickers, info_map
 
 def get_market_data_from_cache(date_str):
     try:
@@ -55,7 +56,6 @@ def save_market_data_to_cache(date_str, notice_set, punish_db):
         try: supabase.table("warning_stocks_cache").insert(data_to_insert).execute()
         except: pass
 
-# --- 3. 官方數據抓取 (台玻 20 分盤精準判定修正) ---
 def get_official_market_data(target_date):
     date_str = target_date.strftime('%Y-%m-%d')
     today_str = target_date.strftime('%Y%m%d')
@@ -63,17 +63,20 @@ def get_official_market_data(target_date):
     
     cached_notice, cached_punish = get_market_data_from_cache(date_str)
     if cached_notice is not None:
-        st.toast("✅ 從雲端快取載入")
         return cached_notice, cached_punish
 
     notice_set, punish_db = set(), {}
     try:
-        # 爬注意股
+        # 注意股 (跳過 SSL 驗證)
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str}&endDate={today_str}&response=json"
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False).json()
-        if res_n.get('stat') == 'OK': notice_set = smart_extract_codes_to_set(res_n['data'])
+        if res_n.get('stat') == 'OK':
+            for row in res_n['data']:
+                for item in row:
+                    val = str(item).strip()
+                    if re.match(r'^\d{4}$', val): notice_set.add(val); break
 
-        # 爬處置股
+        # 處置股 (跳過 SSL 驗證)
         url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str}&endDate={today_str}&response=json"
         res_p = requests.get(url_p, timeout=10, headers=headers, verify=False).json()
         if res_p.get('stat') == 'OK' and res_p.get('data'):
@@ -82,16 +85,11 @@ def get_official_market_data(target_date):
                 code_match = re.search(r'(\d{4})', row_str)
                 if code_match:
                     code = code_match.group(1)
-                    # 🌟 修正：精準判定分鐘數
-                    if "20分" in row_str: m_time = "20分"
-                    elif "45分" in row_str: m_time = "45分"
-                    else: m_time = "5分" # 預設多為 5 分
-                    
-                    # 抓取期間 (通常包含 ~ 或 ～)
+                    # 🌟 精準判定 20分/45分
+                    m_time = "20分" if "20分" in row_str else ("45分" if "45分" in row_str else "5分")
                     period = ""
                     for item in row:
-                        if "~" in str(item) or "～" in str(item):
-                            period = str(item)
+                        if "~" in str(item) or "～" in str(item): period = str(item); break
                     punish_db[code] = {"期間": period, "分盤": m_time}
         
         save_market_data_to_cache(date_str, notice_set, punish_db)
@@ -99,30 +97,28 @@ def get_official_market_data(target_date):
     return notice_set, punish_db
 
 # ==========================================
-# 4. 主介面與核心邏輯
+# 3. 介面與主流程
 # ==========================================
 st.title("🚨 異常注意警示股雷達")
 target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
-start_btn = st.button("🚀 開始連線查核", width='stretch', type="primary")
+start_btn = st.button("🚀 開始查核", width='stretch', type="primary")
 
 my_stocks = ['6548', '3297', '1815', '8112', '0050', '2492']
 
 if start_btn:
+    # 🌟 使用安全獲取方式，避免 SSLError
+    yf_tickers, info_map = get_all_tickers_safe()
+    
     with st.spinner("正在執行全市場掃描與數據分析..."):
         notice_set, punish_db = get_official_market_data(target_date)
         
-        # 獲取全市場代碼 (twstock)
-        twstock.__update_codes()
-        tickers = [f"{c}.TW" if info.market == '上市' else f"{c}.TWO" 
-                   for c, info in twstock.codes.items() if info.type == '股票']
-        
         all_results = []
-        chunk_size = 30 # 🌟 調小批次量避免 YF 頻率限制
+        chunk_size = 25 # 更小的批次，更穩定
         yf_start = target_date - datetime.timedelta(days=45)
         yf_end = target_date + datetime.timedelta(days=1)
 
-        for i in range(0, len(tickers), chunk_size):
-            chunk = tickers[i:i+chunk_size]
+        for i in range(0, len(yf_tickers), chunk_size):
+            chunk = yf_tickers[i:i+chunk_size]
             try:
                 data = yf.download(chunk, start=yf_start, end=yf_end, group_by='ticker', progress=False, threads=True)
                 for t in chunk:
@@ -143,12 +139,12 @@ if start_btn:
                         
                         if status != "一般" or warning != "正常":
                             all_results.append({
-                                "代碼": code, "名稱": twstock.codes[code].name, "狀態": status, "分盤": m_time,
+                                "代碼": code, "名稱": info_map[code]["名稱"], "狀態": status, "分盤": m_time,
                                 "預警": warning, "收盤": round(last_c, 2), "單日漲幅%": round(((last_c-prev_c)/prev_c)*100, 2),
                                 "6日累計漲幅%": round(six_pct, 2), "處置期間": p_period
                             })
                     except: continue
-                time.sleep(0.5) # 🌟 緩衝避免封鎖
+                time.sleep(0.3)
             except: continue
 
         if all_results:
@@ -156,25 +152,22 @@ if start_btn:
             df_final['w'] = df_final['狀態'].map({'🚫處置股': 3, '📢注意股': 2, '一般': 1})
             df_final = df_final.sort_values(['w', '6日累計漲幅%'], ascending=False).drop(columns='w')
 
-            # 🌟 最終樣式修正 (對齊與顏色)
             def custom_style(row):
                 styles = []
                 is_mine = row['代碼'] in my_stocks
                 for col in row.index:
-                    # 處置期間靠左，其餘置中
                     align = "left" if col == '處置期間' else "center"
                     css = f"font-size: 18px; padding: 12px; border-bottom: 1px solid #444; text-align: {align};"
-                    
                     if is_mine: css += "background-color: #1A237E; color: #FFF; font-weight: bold;"
-                    
                     if col == '狀態':
                         if row[col] == '🚫處置股': css += "color: white; background-color: #8B0000;"
                         elif row[col] == '📢注意股': css += "color: black; background-color: #FFD700;"
                     elif col == '分盤':
                         if row[col] == '20分': css += "color: white; background-color: #4B0082;"
                         elif row[col] == '5分': css += "color: white; background-color: #E85D04;"
-                    
                     styles.append(css)
                 return styles
 
             st.write(df_final.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
+        else:
+            st.info("今日無異常標的。")
