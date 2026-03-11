@@ -5,6 +5,7 @@ import requests
 import datetime
 import urllib3
 import re
+import twstock
 from supabase import create_client, Client
 
 # 基礎設定
@@ -41,7 +42,7 @@ def save_market_data_to_cache(date_str, notice_set, punish_db):
         try: supabase.table("warning_stocks_cache").insert(data_to_insert).execute()
         except: pass
 
-# --- 3. 核心抓取邏輯 ---
+# --- 3. 核心抓取邏輯 (OpenAPI) ---
 def fetch_official_announcements(target_date):
     today_str_twse = target_date.strftime('%Y%m%d')
     roc_date_str = f"{target_date.year - 1911}{target_date.strftime('%m%d')}"
@@ -82,6 +83,7 @@ def fetch_official_announcements(target_date):
             
             period = str(row.get("DispositionPeriod", ""))
             is_active = False
+            # 日期區間判定
             if "~" in period or "～" in period:
                 parts = re.split(r'[~～]', period)
                 if len(parts) >= 2:
@@ -108,24 +110,52 @@ def fetch_official_announcements(target_date):
 
     return notice_set, punish_db
 
+# 🌟 修正重點：雙重保險獲取股票身分
 @st.cache_data(ttl=86400)
 def get_stock_info_map():
-    headers = {'User-Agent': 'Mozilla/5.0'}
     info_map = {}
+    # 第一層：離線字典 (保證絕對抓得到上櫃身分)
+    for code, info in twstock.codes.items():
+        if info.type == '股票':
+            info_map[code] = {
+                "名稱": info.name, 
+                "suffix": ".TW" if info.market == "上市" else ".TWO", 
+                "市場": "上市" if info.market == "上市" else "上櫃"
+            }
+            
+    # 第二層：線上更新 (抓取最新上市櫃名單)
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        r_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=10).json()
+        r_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=5).json()
         for r in r_l: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TW", "市場": "上市"}
-        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/t187ap03_O", headers=headers, verify=False, timeout=10).json()
+        # 正確的上櫃 API 路徑
+        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", headers=headers, verify=False, timeout=5).json()
         for r in r_o: info_map[r['公司代號'].strip()] = {"名稱": r['公司簡稱'].strip(), "suffix": ".TWO", "市場": "上櫃"}
     except: pass
+    
     return info_map
 
 # ==========================================
 # 4. 主程式渲染
 # ==========================================
 st.title("🚨 上市 / 上櫃 警示股監測")
-target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
+
+# 🌟 UI 改良：加入清除快取按鈕
+col1, col2 = st.columns([3, 1])
+with col1:
+    target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
+with col2:
+    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+    if st.button("🧹 清除本日快取", width='stretch'):
+        date_str = target_date.strftime('%Y-%m-%d')
+        try:
+            supabase.table("warning_stocks_cache").delete().eq("date", date_str).execute()
+            st.success("快取已清除！請點擊下方同步按鈕。")
+        except Exception as e:
+            st.error("清除失敗")
+
 start_btn = st.button("🚀 執行公告同步", width='stretch', type="primary")
+st.divider()
 
 if start_btn:
     date_str = target_date.strftime('%Y-%m-%d')
@@ -141,14 +171,19 @@ if start_btn:
         codes = list(set(list(notice_set) + list(punish_db.keys())))
         all_results = []
         if codes:
+            # 確保代碼有加上正確的後綴
             tickers = [f"{c}{info_map.get(c, {'suffix':'.TW'})['suffix']}" for c in codes]
             data = yf.download(tickers, period="1mo", group_by='ticker', progress=False)
             
             for c in codes:
                 try:
+                    # 這裡如果還是找不到，預設給上市 (防呆機制)
                     market_info = info_map.get(c, {'suffix':'.TW', '名稱':'未知', '市場':'上市'})
                     ticker = f"{c}{market_info['suffix']}"
+                    
                     df = data[ticker].dropna() if len(tickers) > 1 else data.dropna()
+                    if len(df) < 2: continue # 避免新上市股票資料不足報錯
+                    
                     last_c, prev_c = df.iloc[-1]['Close'], df.iloc[-2]['Close']
                     six_day_c = df.iloc[-7]['Close'] if len(df) >= 7 else df.iloc[0]['Close']
                     
@@ -157,7 +192,7 @@ if start_btn:
                     elif c in notice_set: status = "📢注意股"
                     
                     all_results.append({
-                        "市場": market_info['市場'], # 🌟 加入市場標記
+                        "市場": market_info['市場'],
                         "代碼": c, "名稱": market_info['名稱'], "狀態": status,
                         "分盤": m_time, "收盤": round(last_c, 2),
                         "單日漲幅%": round(((last_c-prev_c)/prev_c)*100, 2),
@@ -167,13 +202,11 @@ if start_btn:
 
         if all_results:
             df_final = pd.DataFrame(all_results)
-            # 排序：處置股 > 注意股；分鐘數 45 > 20 > 5
             status_map, time_map = {'🚫處置股': 2, '📢注意股': 1}, {'45分': 45, '20分': 20, '5分': 5, '-': 0}
             df_final['s_w'] = df_final['狀態'].map(status_map).fillna(0)
             df_final['t_w'] = df_final['分盤'].map(time_map).fillna(0)
             df_final = df_final.sort_values(by=['s_w', 't_w'], ascending=[False, False]).drop(columns=['s_w', 't_w'])
 
-            # 🌟 定義渲染樣式 (與 v10 完全一致)
             def custom_style(row):
                 styles = []
                 for col in row.index:
@@ -189,7 +222,6 @@ if start_btn:
                     styles.append(css)
                 return styles
 
-            # 🌟 建立分頁顯示
             tab1, tab2 = st.tabs(["🏢 上市警示股 (TWSE)", "🏪 上櫃警示股 (TPEX)"])
             
             with tab1:
