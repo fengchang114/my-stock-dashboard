@@ -18,7 +18,7 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# --- 2. 雲端資料庫邏輯 (警示股快取) ---
+# --- 2. 雲端資料庫邏輯 ---
 def get_market_data_from_cache(date_str):
     try:
         res = supabase.table("warning_stocks_cache").select("*").eq("date", date_str).execute()
@@ -41,41 +41,36 @@ def save_market_data_to_cache(date_str, notice_set, punish_db):
         try: supabase.table("warning_stocks_cache").insert(data_to_insert).execute()
         except: pass
 
-# --- 3. 股票代碼主檔管理 (🌟 強制防錯版) ---
+# --- 3. 股票代碼主檔管理 (修正 TPEX 網址) ---
 def update_stock_info_to_db():
     headers = {'User-Agent': 'Mozilla/5.0'}
     stock_dict = {}
 
-    # 第一層保險：使用離線 twstock 字典打底
     try:
         import twstock
         for code, info in twstock.codes.items():
             if info.type == '股票':
                 market = "上市" if info.market == "上市" else "上櫃"
-                suffix = ".TW" if market == "上市" else ".TWO"
-                stock_dict[code] = {"stock_id": code, "stock_name": info.name, "market": market, "suffix": suffix}
+                stock_dict[code] = {"stock_id": code, "stock_name": info.name, "market": market, "suffix": ".TW" if market == "上市" else ".TWO"}
     except: pass
 
-    # 第二層：上市 API 更新
     try:
         r_l = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, verify=False, timeout=10)
         if r_l.status_code == 200 and r_l.text.strip():
             for r in r_l.json():
-                code = r['公司代號'].strip()
-                stock_dict[code] = {"stock_id": code, "stock_name": r['公司簡稱'].strip(), "market": "上市", "suffix": ".TW"}
+                code = r.get('公司代號', '').strip()
+                if code: stock_dict[code] = {"stock_id": code, "stock_name": r.get('公司簡稱', '').strip(), "market": "上市", "suffix": ".TW"}
     except: pass
     
-    # 第三層：上櫃 API 更新 (獨立 Try-Except)
     try:
-        # 使用櫃買中心穩定版端點
-        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", headers=headers, verify=False, timeout=10)
+        # 🌟 修正：使用正確的上櫃 API 端點
+        r_o = requests.get("https://www.tpex.org.tw/openapi/v1/t187ap03_O", headers=headers, verify=False, timeout=10)
         if r_o.status_code == 200 and r_o.text.strip():
             for r in r_o.json():
-                code = r['公司代號'].strip()
-                stock_dict[code] = {"stock_id": code, "stock_name": r['公司簡稱'].strip(), "market": "上櫃", "suffix": ".TWO"}
+                code = r.get('公司代號', '').strip()
+                if code: stock_dict[code] = {"stock_id": code, "stock_name": r.get('公司簡稱', '').strip(), "market": "上櫃", "suffix": ".TWO"}
     except: pass
 
-    # 第四層：手動新股補丁 (覆寫保證正確)
     patch_dict = {
         '7728': '光焱科技', '4749': '新應材', '6907': '雅特力-KY',
         '7751': '竑騰', '7744': '崴寶', '7717': '萊德光電-KY'
@@ -83,20 +78,15 @@ def update_stock_info_to_db():
     for code, name in patch_dict.items():
         stock_dict[code] = {"stock_id": code, "stock_name": name, "market": "上櫃", "suffix": ".TWO"}
 
-    # 將字典轉換為列表準備寫入
     stock_list = list(stock_dict.values())
-    
-    if not stock_list:
-        return False, "無法取得任何股票清單 (全部來源皆失敗)"
+    if not stock_list: return False, "無法取得清單"
 
-    # 寫入 Supabase (分批寫入避免逾時)
     try:
         chunk_size = 500
         for i in range(0, len(stock_list), chunk_size):
             supabase.table("stock_info").upsert(stock_list[i:i+chunk_size]).execute()
         return True, len(stock_list)
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 @st.cache_data(ttl=3600)
 def get_stock_info_from_db():
@@ -104,21 +94,18 @@ def get_stock_info_from_db():
     try:
         res = supabase.table("stock_info").select("*").execute()
         for row in res.data:
-            info_map[row['stock_id']] = {
-                "名稱": row['stock_name'],
-                "市場": row['market'],
-                "suffix": row['suffix']
-            }
+            info_map[row['stock_id']] = {"名稱": row['stock_name'], "市場": row['market'], "suffix": row['suffix']}
     except: pass
     return info_map
 
-# --- 4. 核心抓取公告邏輯 (OpenAPI) ---
+# --- 4. 核心抓取公告邏輯 (修正 115 年 Bug) ---
 def fetch_official_announcements(target_date):
     today_str_twse = target_date.strftime('%Y%m%d')
     roc_date_str = f"{target_date.year - 1911}{target_date.strftime('%m%d')}"
     headers = {'User-Agent': 'Mozilla/5.0'}
     notice_set, punish_db = set(), {}
 
+    # 上市
     try:
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
@@ -132,15 +119,22 @@ def fetch_official_announcements(target_date):
         res_p = requests.get(url_p, timeout=10, headers=headers, verify=False)
         if res_p.status_code == 200 and res_p.text.strip():
             for row in res_p.json().get('data', []):
-                row_str = " ".join(str(item) for item in row)
-                code_match = re.search(r'(\d{4})', row_str)
-                if code_match:
-                    code = code_match.group(1)
+                code = ""
+                # 🌟 關鍵修正：精準抓出代碼，避免抓到 1150 的日期
+                for item in row:
+                    val = str(item).strip()
+                    if re.match(r'^\d{4}$', val):
+                        code = val
+                        break
+                
+                if code:
+                    row_str = " ".join(str(item) for item in row)
                     m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
                     period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
                     punish_db[code] = {"期間": period, "分盤": m_time}
     except: st.toast("⚠️ 證交所資料讀取受阻")
 
+    # 上櫃 OpenAPI
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
@@ -156,7 +150,6 @@ def fetch_official_announcements(target_date):
                         start_d, end_d = parts[0].strip(), parts[1].strip()
                         if len(start_d) == len(roc_date_str) and len(end_d) == len(roc_date_str):
                             if start_d <= roc_date_str <= end_d: is_active = True
-                
                 if not is_active and str(row.get("Date")) == roc_date_str: is_active = True
 
                 if is_active:
@@ -179,12 +172,11 @@ def fetch_official_announcements(target_date):
 # ==========================================
 with st.sidebar:
     st.header("⚙️ 資料庫管理區")
-    st.info("初次使用或有新股上市時，請點擊下方按鈕更新全市場代碼至資料庫。")
     if st.button("🔄 同步全市場代碼至資料庫", width='stretch'):
         with st.spinner("正在安全寫入資料庫..."):
             success, msg = update_stock_info_to_db()
             if success:
-                st.success(f"更新成功！共寫入 {msg} 筆股票代碼。")
+                st.success(f"更新成功！共寫入 {msg} 筆股票。")
                 get_stock_info_from_db.clear()
             else:
                 st.error(f"更新失敗: {msg}")
@@ -248,11 +240,9 @@ if start_btn:
                     elif c in notice_set: status = "📢注意股"
                     
                     all_results.append({
-                        "市場": market_info['市場'],
-                        "代碼": c, "名稱": market_info['名稱'], "狀態": status,
-                        "分盤": m_time, "收盤": last_c,
-                        "單日漲幅%": day_change,
-                        "6日累計漲幅%": six_change, "處置期間": p_period
+                        "市場": market_info['市場'], "代碼": c, "名稱": market_info['名稱'], 
+                        "狀態": status, "分盤": m_time, "收盤": last_c,
+                        "單日漲幅%": day_change, "6日累計漲幅%": six_change, "處置期間": p_period
                     })
 
             if all_results:
@@ -283,14 +273,12 @@ if start_btn:
                     df_twse = df_final[df_final['市場'] == '上市'].drop(columns=['市場'])
                     if not df_twse.empty:
                         st.write(df_twse.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
-                    else:
-                        st.info("今日無上市注意或處置公告。")
+                    else: st.info("今日無上市公告。")
 
                 with tab2:
                     df_tpex = df_final[df_final['市場'] == '上櫃'].drop(columns=['市場'])
                     if not df_tpex.empty:
                         st.write(df_tpex.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
-                    else:
-                        st.info("今日無上櫃注意或處置公告。")
+                    else: st.info("今日無上櫃公告。")
             else:
-                st.warning("該日期查無任何上市櫃注意或處置資料。")
+                st.warning("該日期查無任何上市櫃資料。")
