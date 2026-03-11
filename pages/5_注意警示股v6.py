@@ -72,9 +72,13 @@ def fetch_official_announcements(target_date):
                 code_match = re.search(r'(\d{4})', row_str)
                 if code_match:
                     code = code_match.group(1)
-                    # 撮合時間判定
-                    m_time = "20分" if "20分" in row_str or "二十分" in row_str else \
-                             ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
+                    # 精準分盤判定
+                    if "45分" in row_str or "四十五分" in row_str:
+                        m_time = "45分"
+                    elif "20分" in row_str or "二十分" in row_str:
+                        m_time = "20分"
+                    else:
+                        m_time = "5分"
                     
                     period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
                     punish_db[code] = {"期間": period, "分盤": m_time}
@@ -96,12 +100,9 @@ def get_stock_info_map():
 # ==========================================
 # 4. 主程式流程
 # ==========================================
-st.title("🚨 注意 / 處置股精確監測 (排序優化版)")
+st.title("🚨 注意 / 處置股精確監測 (專業渲染版)")
 target_date = st.date_input("📅 選擇查詢日期", datetime.date.today())
 start_btn = st.button("🚀 同步公告與數據", width='stretch', type="primary")
-
-# 您之前的持股清單 (移除 1802 台玻)
-my_stocks = ['6548', '3297', '1815', '8112', '0050', '2492']
 
 if start_btn:
     date_str = target_date.strftime('%Y-%m-%d')
@@ -111,15 +112,15 @@ if start_btn:
         # STEP 1: 優先查資料庫
         notice_set, punish_db = get_market_data_from_cache(date_str)
         
-        # STEP 2: 若無資料則爬蟲並寫入
+        # STEP 2: 若無資料則爬蟲
         if notice_set is None:
             notice_set, punish_db = fetch_official_announcements(target_date)
             save_market_data_to_cache(date_str, notice_set, punish_db)
-            st.toast("📡 已完成爬蟲並同步至雲端資料庫")
+            st.toast("📡 資料庫已更新")
         else:
-            st.toast("✅ 已從 Supabase 載入歷史資料")
+            st.toast("✅ 從 Supabase 載入")
 
-        # STEP 3: 下載數據與整合
+        # STEP 3: 整理數據
         codes = list(set(list(notice_set) + list(punish_db.keys())))
         all_results = []
         if codes:
@@ -151,39 +152,34 @@ if start_btn:
         if all_results:
             df_final = pd.DataFrame(all_results)
             
-            # 🌟 邏輯排序：狀態權重(處置>注意) + 分盤時間(45>20>5)
+            # 排序邏輯：處置 > 注意 ； 45 > 20 > 5
             status_map = {'🚫處置股': 2, '📢注意股': 1}
             time_map = {'45分': 45, '20分': 20, '5分': 5, '-': 0}
-            
             df_final['s_w'] = df_final['狀態'].map(status_map).fillna(0)
             df_final['t_w'] = df_final['分盤'].map(time_map).fillna(0)
-            
-            # 依照狀態降序、時間降序排序
             df_final = df_final.sort_values(by=['s_w', 't_w'], ascending=[False, False]).drop(columns=['s_w', 't_w'])
 
             def custom_style(row):
                 styles = []
-                is_mine = row['代碼'] in my_stocks
                 for col in row.index:
-                    # 處置期間靠左，其餘置中
+                    # 處置期間靠左，其餘居中
                     align = "left" if col == '處置期間' else "center"
                     css = f"font-size: 18px; padding: 12px; border-bottom: 1px solid #444; text-align: {align};"
                     
-                    # 持股高亮 (不包含台玻)
-                    if is_mine:
-                        css += "background-color: #1A237E; color: #FFF; font-weight: bold; border: 1px solid #FFD700;"
-                    
-                    # 狀態與分盤顏色
+                    # 狀態標籤渲染
                     if col == '狀態':
-                        if row[col] == '🚫處置股': css += "color: white; background-color: #8B0000;"
-                        elif row[col] == '📢注意股': css += "color: black; background-color: #FFD700;"
+                        if row[col] == '🚫處置股': css += "color: white; background-color: #8B0000; font-weight: bold;"
+                        elif row[col] == '📢注意股': css += "color: black; background-color: #FFD700; font-weight: bold;"
+                    
+                    # 分盤時間渲染 (新增 45 分)
                     elif col == '分盤':
-                        if row[col] == '20分': css += "color: white; background-color: #4B0082;"
-                        elif row[col] == '5分': css += "color: white; background-color: #E85D04;"
+                        if row[col] == '45分': css += "color: white; background-color: #000000; font-weight: bold;"
+                        elif row[col] == '20分': css += "color: white; background-color: #4B0082; font-weight: bold;"
+                        elif row[col] == '5分': css += "color: white; background-color: #E85D04; font-weight: bold;"
                     
                     styles.append(css)
                 return styles
 
             st.write(df_final.style.apply(custom_style, axis=1).to_html(), unsafe_allow_html=True)
         else:
-            st.info("該日期無公告資料。")
+            st.info("查無公告標的。")
