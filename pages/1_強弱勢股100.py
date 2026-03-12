@@ -2,10 +2,16 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import datetime  # 新增：用於處理日期
 
 st.set_page_config(page_title="強弱勢股掃描", layout="wide", page_icon="🔥")
 st.title("🔥 強弱勢飆股掃描器")
 st.markdown("利用本地官方資料庫，瞬間篩選出盤面上**爆量且高振幅**的主力焦點股！")
+
+# ==========================================
+# 新增：在標題下方獨立一行加入日期選擇器
+# ==========================================
+selected_date = st.date_input("🗓️ 請選擇資料日期", datetime.date.today())
 
 # ==========================================
 # 1. 讀取並整合上市櫃本地資料 (極速掃描核心)
@@ -112,7 +118,8 @@ else:
     # 3. 大字體 HTML 完美渲染
     # ==========================================
     st.divider()
-    st.subheader(f"🔍 掃描結果：共發現 {len(df_result)} 檔符合條件的標的 (顯示前50檔)")
+    # 新增：將選擇的日期動態加入到掃描結果的標題中
+    st.subheader(f"🔍 {selected_date} 掃描結果：共發現 {len(df_result)} 檔符合條件的標的 (顯示前50檔)")
     
     if not df_display.empty:
         def custom_style(row):
