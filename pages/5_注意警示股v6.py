@@ -18,7 +18,7 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-# --- 2. 雲端資料庫邏輯 (警示股快取) ---
+# --- 2. 雲端資料庫邏輯 ---
 def get_market_data_from_cache(date_str):
     try:
         res = supabase.table("warning_stocks_cache").select("*").eq("date", date_str).execute()
@@ -97,63 +97,80 @@ def get_stock_info_from_db():
     except: pass
     return info_map
 
-# --- 4. 核心抓取公告邏輯 (🌟 加入資料發布守門員) ---
+# --- 4. 核心抓取公告邏輯 (🌟 終極日期護照查驗) ---
 def fetch_official_announcements(target_date):
     today_str_twse = target_date.strftime('%Y%m%d')
     roc_date_str = f"{target_date.year - 1911}{target_date.strftime('%m%d')}"
+    
+    # 用於比對 TWSE JSON 內的標題，例如 "115年03月12日"
+    twse_roc_title_date = f"{target_date.year - 1911}年{target_date.strftime('%m')}月{target_date.strftime('%d')}日"
+    
     headers = {'User-Agent': 'Mozilla/5.0'}
     notice_set, punish_db, name_dict = set(), {}, {}
     
-    # 🌟 守門員標籤：確認官方檔案是否已更新
     is_data_updated = False 
 
-    # 上市
+    # 上市 - 注意股
     try:
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
         if res_n.status_code == 200 and res_n.text.strip():
-            data_list = res_n.json().get('data', [])
-            if data_list: is_data_updated = True # 只要抓到當日清單，就代表已更新
-            for row in data_list:
-                code, name = "", ""
-                for idx, item in enumerate(row):
-                    val = str(item).strip()
-                    if re.match(r'^\d{4}$', val):
-                        code = val
-                        if idx + 1 < len(row): name = str(row[idx+1]).strip()
-                        break
-                if code:
-                    notice_set.add(code)
-                    if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
-        
+            res_json = res_n.json()
+            api_date = str(res_json.get('date', ''))
+            api_title = str(res_json.get('title', ''))
+            
+            # 🌟 嚴格防偽查驗：日期必須完全吻合才算更新！
+            if api_date == today_str_twse or twse_roc_title_date in api_title:
+                is_data_updated = True
+                for row in res_json.get('data', []):
+                    code, name = "", ""
+                    for idx, item in enumerate(row):
+                        val = str(item).strip()
+                        if re.match(r'^\d{4}$', val):
+                            code = val
+                            if idx + 1 < len(row): name = str(row[idx+1]).strip()
+                            break
+                    if code:
+                        notice_set.add(code)
+                        if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
+    except: pass
+
+    # 上市 - 處置股
+    try:
         url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res_p = requests.get(url_p, timeout=10, headers=headers, verify=False)
         if res_p.status_code == 200 and res_p.text.strip():
-            data_list = res_p.json().get('data', [])
-            if data_list: is_data_updated = True
-            for row in data_list:
-                code, name = "", ""
-                for idx, item in enumerate(row):
-                    val = str(item).strip()
-                    if re.match(r'^\d{4}$', val):
-                        code = val
-                        if idx + 1 < len(row): name = str(row[idx+1]).strip()
-                        break
-                if code:
-                    row_str = " ".join(str(item) for item in row)
-                    m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
-                    period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
-                    punish_db[code] = {"期間": period, "分盤": m_time}
-                    if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
-    except: st.toast("⚠️ 證交所資料讀取受阻")
+            res_json = res_p.json()
+            api_date = str(res_json.get('date', ''))
+            api_title = str(res_json.get('title', ''))
+            
+            # 🌟 同樣嚴格查驗
+            if api_date == today_str_twse or twse_roc_title_date in api_title:
+                is_data_updated = True
+                for row in res_json.get('data', []):
+                    code, name = "", ""
+                    for idx, item in enumerate(row):
+                        val = str(item).strip()
+                        if re.match(r'^\d{4}$', val):
+                            code = val
+                            if idx + 1 < len(row): name = str(row[idx+1]).strip()
+                            break
+                    if code:
+                        row_str = " ".join(str(item) for item in row)
+                        m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
+                        period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
+                        punish_db[code] = {"期間": period, "分盤": m_time}
+                        if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
+    except: pass
 
     # 上櫃 OpenAPI
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
             for row in res_tp.json():
+                # 只要上櫃 OpenAPI 裡出現了押著今天日期的公告，就代表已更新
                 if str(row.get("Date")) == roc_date_str:
-                    is_data_updated = True # 檔案內包含押今日日期的公告，代表已更新
+                    is_data_updated = True
                 
                 code = str(row.get("SecuritiesCompanyCode", "")).strip()
                 name = str(row.get("CompanyName", "")).strip()
@@ -179,13 +196,13 @@ def fetch_official_announcements(target_date):
         if res_tn.status_code == 200 and res_tn.text.strip():
             for row in res_tn.json():
                 if str(row.get("Date")) == roc_date_str:
-                    is_data_updated = True # 注意股有今日公告，代表已更新
+                    is_data_updated = True
                     code = str(row.get("SecuritiesCompanyCode", "")).strip()
                     name = str(row.get("CompanyName", "")).strip()
                     if re.match(r'^\d{4}$', code): 
                         notice_set.add(code)
                         if name: name_dict[code] = {"名稱": name, "市場": "上櫃", "suffix": ".TWO"}
-    except: st.toast("⚠️ 櫃買中心 OpenAPI 連線失敗")
+    except: pass
 
     return notice_set, punish_db, name_dict, is_data_updated
 
@@ -228,22 +245,20 @@ if start_btn:
     if not info_map:
         st.warning("⚠️ 查無股票主檔，請先至左側邊欄點擊「同步全市場代碼至資料庫」。")
     else:
-        with st.spinner("同步公告與下載行情中..."):
+        with st.spinner("查驗官方發布狀態與下載行情中..."):
             notice_set, punish_db = get_market_data_from_cache(date_str)
             
             if notice_set is None:
-                # 只有資料庫沒快取時，才去爬蟲
                 notice_set, punish_db, name_dict, is_updated = fetch_official_announcements(target_date)
                 
-                # 🌟 如果官方根本還沒發布資料，直接攔截！
+                # 🌟 如果官方想塞昨天的資料給我們，直接拒收並暫停執行！
                 if not is_updated:
-                    st.warning(f"⏳ 官方尚未發布 {date_str} 的最新公告，或當日為休市日。\n\n請於盤後（約 17:30 後）再試一次！")
-                    st.stop() # 停止往下渲染表格，也不寫入快取
+                    st.warning(f"⏳ 官方尚未發布 {date_str} 的最新公告，或當日為休市日。\n\n⚠️ 系統已自動阻擋官方傳回的舊資料，請於盤後（約 17:30 後）再試一次！")
+                    st.stop()
                 
-                # 確定有更新，才安全寫入快取
+                # 確認真的是今天的資料後，才准許存入快取
                 save_market_data_to_cache(date_str, notice_set, punish_db)
                 
-                # 處理名稱自我修復
                 if name_dict:
                     new_stocks = []
                     for code, data in name_dict.items():
