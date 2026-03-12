@@ -2,22 +2,27 @@ import streamlit as st
 import pandas as pd
 import requests
 import datetime
+import urllib3  # 新增：用來處理 SSL 警告
+
+# 關閉忽略 SSL 驗證時產生的警告訊息
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="強弱勢股掃描", layout="wide", page_icon="🔥")
 st.title("🔥 強弱勢飆股掃描器 (自動更新版)")
 st.markdown("連線證交所與櫃買中心抓取**最新盤後資料**，瞬間篩選出盤面上爆量且高振幅的主力焦點股！")
 
 # ==========================================
-# 1. 自動連線官方 API 抓取最新資料 (取代本地檔案)
+# 1. 自動連線官方 API 抓取最新資料 
 # ==========================================
-@st.cache_data(ttl=3600)  # 快取 1 小時，避免頻繁重整被官方阻擋
+@st.cache_data(ttl=3600)  
 def load_all_market_data():
     all_stocks = []
     
     # --- 抓取「上市」最新資料 ---
     twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
     try:
-        res_twse = requests.get(twse_url, timeout=10)
+        # 新增 verify=False 略過 SSL 憑證檢查
+        res_twse = requests.get(twse_url, timeout=10, verify=False)
         if res_twse.status_code == 200:
             for row in res_twse.json():
                 try:
@@ -42,7 +47,8 @@ def load_all_market_data():
     # --- 抓取「上櫃」最新資料 ---
     tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
     try:
-        res_tpex = requests.get(tpex_url, timeout=10)
+        # 新增 verify=False 略過 SSL 憑證檢查
+        res_tpex = requests.get(tpex_url, timeout=10, verify=False)
         if res_tpex.status_code == 200:
             for row in res_tpex.json():
                 try:
@@ -76,8 +82,7 @@ def load_all_market_data():
 # ==========================================
 # 2. 篩選介面與邏輯
 # ==========================================
-# 加入讀取動畫，提升體驗
-with st.spinner('連線官方 API 抓取最新行情中，請稍候...'):
+with st.spinner('連線官方 API 抓取最新行情中，這可能需要幾秒鐘，請稍候...'):
     df_all = load_all_market_data()
 
 if df_all.empty:
@@ -110,7 +115,7 @@ else:
     df_display = df_result[['代碼', '商品', '開盤', '最高', '最低', '收盤', '漲跌', '漲幅%', '振幅%', '成交量(張)']].head(50)
 
     # ==========================================
-    # 3. 大字體與漲跌停特別標示 (保留您之前的設定)
+    # 3. 大字體與漲跌停特別標示 
     # ==========================================
     st.divider()
     
@@ -126,7 +131,7 @@ else:
                 # 收盤價粗體
                 if col == '收盤': css += "font-weight: bold; "
                 
-                # 漲跌與漲幅顏色 (保留您設定的深綠色 #1e7b1e)
+                # 漲跌與漲幅顏色
                 if col in ['漲跌', '漲幅%']:
                     if row[col] > 0: css += "color: #ff4b4b; "
                     elif row[col] < 0: css += "color: #1e7b1e; " 
