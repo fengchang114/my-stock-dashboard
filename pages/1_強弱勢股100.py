@@ -120,8 +120,12 @@ else:
     st.divider()
     
     # 取得今天日期來標示
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
-    st.subheader(f"🔍 最新交易日 ({today_str}) 掃描結果：共發現 {len(df_result)} 檔標的")
+    # today_str = datetime.date.today().strftime("%Y-%m-%d")
+    # st.subheader(f"🔍 最新交易日 ({today_str}) 掃描結果：共發現 {len(df_result)} 檔標的")
+
+    # 取得精確的現在時間 (包含時分)
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.subheader(f"🔍 最新盤後掃描結果：共發現 {len(df_result)} 檔標的 (報表執行時間：{now_str})")
     
     if not df_display.empty:
         def custom_style(row):
@@ -161,3 +165,4 @@ else:
         st.markdown(styled_df.to_html(), unsafe_allow_html=True)
     else:
         st.info("💡 目前沒有符合上述條件的標的，您可以嘗試放寬「成交量」或「振幅」的條件。")
+
