@@ -152,7 +152,7 @@ with col_search:
     selected_stock = st.selectbox(
         "🔍 搜尋並新增持股 (請輸入代號或名稱)：", 
         options=[""] + all_stock_options,
-        index=0
+        key="stock_selector"  # 👈 關鍵 1：綁定一個專屬 Key 給這個選單
     )
 with col_add:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
@@ -160,10 +160,16 @@ with col_add:
         if selected_stock:
             if selected_stock not in st.session_state.holdings_list:
                 st.session_state.holdings_list.append(selected_stock)
-                st.success(f"已加入 {selected_stock}！")
-                st.rerun() # 立即重整，更新下方標籤與表格
+                # 改用 toast 浮動提示，才不會因為下面的 rerun 而閃退消失
+                st.toast(f"✅ 已將 {selected_stock} 加入清單！")
             else:
-                st.warning(f"{selected_stock} 已經在清單中囉！")
+                st.toast(f"⚠️ {selected_stock} 已經在清單中囉！")
+            
+            # 👈 關鍵 2：強制將選單狀態設為空字串，達到「清空」的效果
+            st.session_state.stock_selector = "" 
+            
+            # 👈 關鍵 3：立刻重整畫面，讓下方的標籤列與圖表同步更新
+            st.rerun()
 
 # 第二排：持股標籤顯示 (取代原本的 text_input) 與儲存
 col_list, col_date, col_save = st.columns([5, 2, 2])
