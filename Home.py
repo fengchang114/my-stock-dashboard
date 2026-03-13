@@ -15,17 +15,65 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 # ==========================================
 # 迷你資料庫：存取持股與動態記憶
 # ==========================================
--- 建立持股設定表
-CREATE TABLE user_settings (
-  key TEXT PRIMARY KEY,
-  value TEXT
-);
+# ==========================================
+# 雲端資料庫：Supabase 存取持股與動態記憶
+# ==========================================
+from supabase import create_client, Client
 
--- 建立名稱快取表
-CREATE TABLE stock_name_cache (
-  code TEXT PRIMARY KEY,
-  name TEXT
-);
+# 🌟 預設持股清單 
+DEFAULT_HOLDINGS = "^TWII 加權指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
+
+COMMON_ETF_MAP = {
+    "^TWII": "加權指數", "^TWOII": "櫃買指數",
+    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
+    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
+}
+
+# 初始化 Supabase 連線 (使用 cache_resource 避免重複連線)
+@st.cache_resource
+def init_connection():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+try:
+    supabase: Client = init_connection()
+except Exception as e:
+    st.error(f"⚠️ Supabase 連線失敗，請檢查 .streamlit/secrets.toml 設定。錯誤訊息: {e}")
+
+def load_holdings():
+    try:
+        # 讀取 user_settings 表中的持股資料
+        response = supabase.table("user_settings").select("value").eq("key", "holdings").execute()
+        if response.data:
+            return response.data[0]["value"]
+    except Exception as e:
+        st.warning(f"無法讀取雲端持股，將使用預設值。({e})")
+    return DEFAULT_HOLDINGS
+
+def save_holdings(holdings_str):
+    try:
+        # 使用 upsert：存在就更新，不存在就新增
+        supabase.table("user_settings").upsert({"key": "holdings", "value": holdings_str}).execute()
+    except Exception as e:
+        st.error(f"儲存持股至 Supabase 失敗: {e}")
+
+def load_name_cache():
+    try:
+        response = supabase.table("stock_name_cache").select("code", "name").execute()
+        return {row["code"]: row["name"] for row in response.data}
+    except Exception as e:
+        return {}
+
+def save_name_cache(cache_dict):
+    if not cache_dict: return
+    # 將 dict 轉為 Supabase upsert 支援的 list of dicts 格式
+    data_to_upsert = [{"code": k, "name": v} for k, v in cache_dict.items()]
+    try:
+        supabase.table("stock_name_cache").upsert(data_to_upsert).execute()
+    except Exception as e:
+        pass # 背景快取更新失敗可略過，不打斷使用者體驗
 
 # ==========================================
 # 讀取本地官方名冊
@@ -240,6 +288,7 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+
 
 
 
