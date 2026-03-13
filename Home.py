@@ -15,11 +15,15 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 # ==========================================
 # 迷你資料庫：存取持股與動態記憶
 # ==========================================
-HOLDINGS_FILE = "my_holdings.txt"
-NAME_CACHE_FILE = "name_cache.json" 
+# ==========================================
+# 輕量資料庫：存取持股與動態記憶 (SQLite 升級版)
+# ==========================================
+import sqlite3
 
-# 🌟 預設持股清單
-DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 1717 長興, 1802 台玻, 2317 鴻海, 4952 凌通"
+DB_FILE = "dashboard_data.db"
+
+# 🌟 預設持股清單 
+DEFAULT_HOLDINGS = "^TWII 加權指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
 
 COMMON_ETF_MAP = {
     "^TWII": "加權指數", "^TWOII": "櫃買指數",
@@ -28,27 +32,47 @@ COMMON_ETF_MAP = {
     "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
 }
 
+def init_db():
+    """初始化 SQLite 資料庫與資料表"""
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        # 建立 settings 表：用來存儲使用者的持股字串 (Key-Value 形式)
+        c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
+        # 建立 name_cache 表：取代原本的 json，用來做代碼與名稱的防呆對應
+        c.execute('CREATE TABLE IF NOT EXISTS name_cache (code TEXT PRIMARY KEY, name TEXT)')
+        conn.commit()
+
+# 每次啟動時確認資料庫與資料表已建立
+init_db()
+
 def load_holdings():
-    if os.path.exists(HOLDINGS_FILE):
-        with open(HOLDINGS_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return DEFAULT_HOLDINGS
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key='holdings'")
+        row = c.fetchone()
+        return row[0] if row else DEFAULT_HOLDINGS
 
 def save_holdings(holdings_str):
-    with open(HOLDINGS_FILE, "w", encoding="utf-8") as f:
-        f.write(holdings_str)
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        # REPLACE INTO：如果 key 存在就更新，不存在就新增
+        c.execute("REPLACE INTO settings (key, value) VALUES ('holdings', ?)", (holdings_str,))
+        conn.commit()
 
 def load_name_cache():
-    if os.path.exists(NAME_CACHE_FILE):
-        try:
-            with open(NAME_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: return {}
-    return {}
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        c.execute("SELECT code, name FROM name_cache")
+        # 直接轉回你原本程式邏輯習慣的 dict 格式
+        return {row[0]: row[1] for row in c.fetchall()}
 
 def save_name_cache(cache_dict):
-    with open(NAME_CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache_dict, f, ensure_ascii=False, indent=2)
+    if not cache_dict: return
+    with sqlite3.connect(DB_FILE) as conn:
+        c = conn.cursor()
+        # 批次更新快取，效能更高且安全
+        c.executemany("REPLACE INTO name_cache (code, name) VALUES (?, ?)", cache_dict.items())
+        conn.commit()
 
 # ==========================================
 # 讀取本地官方名冊
@@ -263,4 +287,5 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+
 
