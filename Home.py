@@ -212,13 +212,14 @@ for p in st.session_state.holdings_list:
         target_code = current_codes[-1]
         final_parsed_names[target_code] = ""
 
-# 🌟 智慧防呆解析引擎
-raw_str = st.session_state.current_holdings.replace('、', ',').replace('，', ',')
-pairs = [s.strip() for s in raw_str.split(',') if s.strip()]
+# ==========================================
+# 🌟 智慧防呆解析引擎 (配合 List 架構更新)
+# ==========================================
 my_codes = []
 final_parsed_names = {} 
 
-for p in pairs:
+# 直接迴圈處理 st.session_state.holdings_list，不再需要 replace 和 split 字串了！
+for p in st.session_state.holdings_list:
     tokens = p.split()
     current_codes = []
     name_tokens = []
