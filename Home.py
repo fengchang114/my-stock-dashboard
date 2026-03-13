@@ -128,9 +128,13 @@ st.divider()
 stock_db_dict = load_stock_info_from_db()
 all_stock_options = [f"{k} {v['name']}" for k, v in stock_db_dict.items()]
 
-# 2. 狀態管理：使用 session_state 暫存持股清單
-if "current_holdings" not in st.session_state:
-    st.session_state.current_holdings = load_holdings()
+# ==========================================
+# 2. 狀態管理：改用 List 儲存，方便操作與顯示
+# ==========================================
+if "holdings_list" not in st.session_state:
+    raw_str = load_holdings()
+    # 將雲端的字串拆解為乾淨的 List
+    st.session_state.holdings_list = [s.strip() for s in raw_str.replace('、', ',').replace('，', ',').split(',') if s.strip()]
 
 # 第一排：搜尋與新增
 col_search, col_add = st.columns([4, 1])
@@ -144,38 +148,69 @@ with col_add:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     if st.button("➕ 新增至清單", use_container_width=True):
         if selected_stock:
-            if selected_stock not in st.session_state.current_holdings:
-                if st.session_state.current_holdings.strip():
-                    st.session_state.current_holdings += f", {selected_stock}"
-                else:
-                    st.session_state.current_holdings = selected_stock
-                st.success(f"已將 {selected_stock} 加入下方清單！")
-                st.rerun()
+            if selected_stock not in st.session_state.holdings_list:
+                st.session_state.holdings_list.append(selected_stock)
+                st.success(f"已加入 {selected_stock}！")
+                st.rerun() # 立即重整，更新下方標籤與表格
             else:
                 st.warning(f"{selected_stock} 已經在清單中囉！")
 
-# 第二排：當前持股顯示與儲存
+# 第二排：持股標籤顯示 (取代原本的 text_input) 與儲存
 col_list, col_date, col_save = st.columns([5, 2, 2])
 with col_list:
-    user_stocks_input = st.text_input(
-        "📝 目前持股清單 (可手動修改/刪除)：", 
-        value=st.session_state.current_holdings
+    # 確保原本手動輸入的自訂 ETF 也能正常顯示在選項中，避免報錯
+    safe_options = list(set(all_stock_options + st.session_state.holdings_list))
+    
+    # 使用 multiselect 作為持股清單的「容器」，美觀且能點擊 'x' 輕易刪除
+    updated_list = st.multiselect(
+        "🏷️ 目前持股清單 (點選 'x' 可移除)：", 
+        options=safe_options, 
+        default=st.session_state.holdings_list
     )
-    st.session_state.current_holdings = user_stocks_input 
+    # 同步使用者的刪除動作回 session_state
+    st.session_state.holdings_list = updated_list
 
 with col_date:
     selected_date = st.date_input("選擇日期", datetime.date.today())
 
 with col_save:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-    save_btn = st.button("💾 儲存為預設", use_container_width=True)
-
-if save_btn:
-    save_holdings(st.session_state.current_holdings)
-    st.success("✅ 持股清單已成功存檔至雲端！")
+    if st.button("💾 儲存為預設", use_container_width=True):
+        # 將 List 重新組合為逗號分隔的字串，寫入 Supabase
+        save_str = ", ".join(st.session_state.holdings_list)
+        save_holdings(save_str)
+        st.success("✅ 持股清單已成功存檔至雲端！")
 
 if selected_date.weekday() >= 5:
     st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
+
+# ==========================================
+# 🌟 智慧防呆解析引擎 (配合 List 架構更新)
+# ==========================================
+my_codes = []
+final_parsed_names = {} 
+
+# 直接迴圈處理 List，省去字串切割的麻煩
+for p in st.session_state.holdings_list:
+    tokens = p.split()
+    current_codes = []
+    name_tokens = []
+    
+    for t in tokens:
+        if re.match(r'^\^?[A-Za-z]?\d{4,6}[A-Za-z]?$', t) or t in COMMON_ETF_MAP:
+            current_codes.append(t)
+            if t not in my_codes:
+                my_codes.append(t)
+        else:
+            name_tokens.append(t)
+            
+    if current_codes and name_tokens:
+        target_code = current_codes[-1]
+        name_part = " ".join(name_tokens)
+        final_parsed_names[target_code] = name_part
+    elif current_codes:
+        target_code = current_codes[-1]
+        final_parsed_names[target_code] = ""
 
 # 🌟 智慧防呆解析引擎
 raw_str = st.session_state.current_holdings.replace('、', ',').replace('，', ',')
