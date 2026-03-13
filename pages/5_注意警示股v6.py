@@ -161,7 +161,8 @@ def fetch_official_announcements(target_date, silent=False):
                             if start_d <= roc_date_str <= end_d: is_active = True
                     if is_active:
                         punish_db[code] = {"期間": period, "分盤": m_time}
-                        if name: name_dict[code] = {"名稱": name, "上市", "suffix": ".TW"}
+                        # 🌟 已經修復這裡的語法錯誤
+                        if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
     except: pass
 
     # ==========================
