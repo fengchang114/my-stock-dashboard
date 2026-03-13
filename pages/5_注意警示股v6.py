@@ -97,7 +97,7 @@ def get_stock_info_from_db():
     except: pass
     return info_map
 
-# --- 4. 核心抓取公告邏輯 (🌟 升級 4~6 碼動態捕捉) ---
+# --- 4. 核心抓取公告邏輯 ---
 def fetch_official_announcements(target_date):
     today_str_twse = target_date.strftime('%Y%m%d')
     roc_date_str = f"{target_date.year - 1911}{target_date.strftime('%m%d')}"
@@ -112,11 +112,6 @@ def fetch_official_announcements(target_date):
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
         if res_n.status_code == 200 and res_n.text.strip():
             res_json = res_n.json()
-# =====================================================================
-            # 👉 加上這兩行：把抓到的 res_json 直接印在畫面上！
-            st.write(f"🔍 【除錯用】這是證交所回傳的 {today_str_twse} 上市注意股：")
-            st.json(res_json)
-# =====================================================================
             if res_json.get('date', '') == today_str_twse or twse_roc_title_date in res_json.get('title', ''):
                 data_list = res_json.get('data', [])
                 if data_list: is_data_updated = True
@@ -124,7 +119,6 @@ def fetch_official_announcements(target_date):
                     code, name = "", ""
                     for idx, item in enumerate(row):
                         val = str(item).strip()
-                        # 🌟 容許 4~6 碼英數字 (捕捉 15894 等可轉債)，但避開 7 碼的日期
                         if re.match(r'^[0-9A-Z]{4,6}$', val):
                             code = val
                             if idx + 1 < len(row): name = str(row[idx+1]).strip()
@@ -134,28 +128,38 @@ def fetch_official_announcements(target_date):
                         if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
     except: pass
 
-    # 上市 - 處置股
+    # 🌟 上市 - 處置股 (核心修復：往前抓 30 天，捕捉正在關的股票)
     try:
-        url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
+        start_date_30 = (target_date - datetime.timedelta(days=30)).strftime('%Y%m%d')
+        url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={start_date_30}&endDate={today_str_twse}&response=json"
         res_p = requests.get(url_p, timeout=10, headers=headers, verify=False)
         if res_p.status_code == 200 and res_p.text.strip():
             res_json = res_p.json()
-            if res_json.get('date', '') == today_str_twse or twse_roc_title_date in res_json.get('title', ''):
-                data_list = res_json.get('data', [])
-                if data_list: is_data_updated = True
-                for row in data_list:
-                    code, name = "", ""
-                    for idx, item in enumerate(row):
-                        val = str(item).strip()
-                        # 🌟 同步升級 4~6 碼
-                        if re.match(r'^[0-9A-Z]{4,6}$', val):
-                            code = val
-                            if idx + 1 < len(row): name = str(row[idx+1]).strip()
-                            break
-                    if code:
-                        row_str = " ".join(str(item) for item in row)
-                        m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
-                        period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
+            data_list = res_json.get('data', [])
+            for row in data_list:
+                code, name = "", ""
+                for idx, item in enumerate(row):
+                    val = str(item).strip()
+                    if re.match(r'^[0-9A-Z]{4,6}$', val):
+                        code = val
+                        if idx + 1 < len(row): name = str(row[idx+1]).strip()
+                        break
+                if code:
+                    row_str = " ".join(str(item) for item in row)
+                    m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
+                    period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
+                    
+                    # 判斷目標日期是否落在處置期間內
+                    is_active = False
+                    if "~" in period or "～" in period:
+                        parts = re.split(r'[~～]', period)
+                        if len(parts) >= 2:
+                            start_d = parts[0].replace('/', '').strip()
+                            end_d = parts[1].replace('/', '').strip()
+                            if start_d <= roc_date_str <= end_d:
+                                is_active = True
+                    
+                    if is_active:
                         punish_db[code] = {"期間": period, "分盤": m_time}
                         if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
     except: pass
@@ -164,18 +168,6 @@ def fetch_official_announcements(target_date):
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
-# ======================================================================
-            # 先把資料存進變數 tp_json
-            tp_json = res_tp.json() 
-            
-            # 👉 加上這兩行：把抓到的 tp_json 印出來！
-            st.write(f"🔍 【除錯用】這是櫃買中心回傳的上櫃處置股總表：")
-            st.json(tp_json)
-            
-            # 接下來的迴圈改成跑 tp_json
-            for row in tp_json:
-                if str(row.get("Date")) == roc_date_str: is_data_updated = True
-# ====================================================================
             for row in res_tp.json():
                 if str(row.get("Date")) == roc_date_str: is_data_updated = True
                 
@@ -248,10 +240,10 @@ st.divider()
 if start_btn:
     date_str = target_date.strftime('%Y-%m-%d')
     
-    # 🌟 時光鎖定系統 (Time Lock)：確保當日盤後才允許查詢
+    # 時光鎖定系統 (Time Lock)：確保當日盤後才允許查詢
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     if target_date == tw_now.date() and tw_now.hour < 17:
-        st.warning("⏳ 官方盤後資料通常於下午 17:30 後發布，目前尚未更新今日名單！\n\n⚠️ 系統已自動攔截查詢，請於 17:30 後再試。")
+        st.warning("⏳ 今日盤後資料通常於下午 17:30 後發布，目前尚未更新！\n\n⚠️ 系統已自動攔截查詢，請於 17:30 後再試。")
         st.stop()
 
     info_map = get_stock_info_from_db()
@@ -266,7 +258,7 @@ if start_btn:
                 notice_set, punish_db, name_dict, is_updated = fetch_official_announcements(target_date)
                 
                 if not is_updated:
-                    st.warning(f"⏳ 官方尚未發布 {date_str} 的最新公告，或當日為休市日。\n\n⚠️ 系統已自動阻擋官方傳回的舊資料。")
+                    st.warning(f"⏳ 官方尚未發布 {date_str} 的最新公告，或當日為休市日。\n\n⚠️ 系統已自動阻擋，請稍後再試。")
                     st.stop()
                 
                 save_market_data_to_cache(date_str, notice_set, punish_db)
@@ -278,7 +270,10 @@ if start_btn:
                             info_map[code] = data
                             new_stocks.append({"stock_id": code, "stock_name": data["名稱"], "market": data["市場"], "suffix": data["suffix"]})
                     if new_stocks:
-                        try: supabase.table("stock_info").upsert(new_stocks).execute()
+                        try: 
+                            supabase.table("stock_info").upsert(new_stocks).execute()
+                            # 🌟 核心修復：寫入資料庫後，強制清除記憶體快取，保證下次讀取為中文！
+                            get_stock_info_from_db.clear()
                         except: pass
             
             codes = list(set(list(notice_set) + list(punish_db.keys())))
@@ -288,7 +283,6 @@ if start_btn:
                 for c in codes:
                     market_info = info_map.get(c)
                     
-                    # 🌟 終極姓名救援：如果還是數字，直接呼叫離線字典救援
                     if not market_info or market_info['名稱'] == c or market_info['名稱'].isdigit():
                         if c in twstock.codes:
                             t_info = twstock.codes[c]
@@ -299,7 +293,7 @@ if start_btn:
                             }
                         else:
                             market_info = market_info or {'suffix':'.TWO', '名稱':c, '市場':'上櫃'}
-                        info_map[c] = market_info # 更新暫存
+                        info_map[c] = market_info
                         
                     tickers.append(f"{c}{market_info['suffix']}")
 
