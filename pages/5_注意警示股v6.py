@@ -112,6 +112,11 @@ def fetch_official_announcements(target_date):
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
         if res_n.status_code == 200 and res_n.text.strip():
             res_json = res_n.json()
+# =====================================================================
+            # 👉 加上這兩行：把抓到的 res_json 直接印在畫面上！
+            st.write(f"🔍 【除錯用】這是證交所回傳的 {today_str_twse} 上市注意股：")
+            st.json(res_json)
+# =====================================================================
             if res_json.get('date', '') == today_str_twse or twse_roc_title_date in res_json.get('title', ''):
                 data_list = res_json.get('data', [])
                 if data_list: is_data_updated = True
@@ -159,6 +164,18 @@ def fetch_official_announcements(target_date):
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
+# ======================================================================
+            # 先把資料存進變數 tp_json
+            tp_json = res_tp.json() 
+            
+            # 👉 加上這兩行：把抓到的 tp_json 印出來！
+            st.write(f"🔍 【除錯用】這是櫃買中心回傳的上櫃處置股總表：")
+            st.json(tp_json)
+            
+            # 接下來的迴圈改成跑 tp_json
+            for row in tp_json:
+                if str(row.get("Date")) == roc_date_str: is_data_updated = True
+# ====================================================================
             for row in res_tp.json():
                 if str(row.get("Date")) == roc_date_str: is_data_updated = True
                 
