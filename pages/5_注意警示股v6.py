@@ -87,14 +87,28 @@ def update_stock_info_to_db():
         return True, len(stock_list)
     except Exception as e: return False, str(e)
 
+# 🌟 核心修復：突破 1000 筆限制的分頁抓取器
 @st.cache_data(ttl=3600)
 def get_stock_info_from_db():
     info_map = {}
     try:
-        res = supabase.table("stock_info").select("*").execute()
-        for row in res.data:
-            info_map[row['stock_id']] = {"名稱": row['stock_name'], "市場": row['market'], "suffix": row['suffix']}
-    except: pass
+        page_size = 1000
+        start = 0
+        while True:
+            # 每次抓取 1000 筆，直到抓完為止
+            res = supabase.table("stock_info").select("*").range(start, start + page_size - 1).execute()
+            data = res.data
+            if not data:
+                break
+            for row in data:
+                info_map[row['stock_id']] = {"名稱": row['stock_name'], "市場": row['market'], "suffix": row['suffix']}
+            
+            # 如果這次抓回來的少於 1000 筆，代表已經到底了
+            if len(data) < page_size:
+                break
+            start += page_size
+    except Exception as e:
+        print(f"DB Error: {e}")
     return info_map
 
 # --- 4. 核心抓取公告邏輯 ---
@@ -106,7 +120,6 @@ def fetch_official_announcements(target_date):
     notice_set, punish_db, name_dict = set(), {}, {}
     is_data_updated = False 
 
-    # 上市 - 注意股
     try:
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
@@ -128,7 +141,6 @@ def fetch_official_announcements(target_date):
                         if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
     except: pass
 
-    # 🌟 上市 - 處置股 (核心修復：往前抓 30 天，捕捉正在關的股票)
     try:
         start_date_30 = (target_date - datetime.timedelta(days=30)).strftime('%Y%m%d')
         url_p = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={start_date_30}&endDate={today_str_twse}&response=json"
@@ -149,7 +161,6 @@ def fetch_official_announcements(target_date):
                     m_time = "20分" if "20分" in row_str or "二十分" in row_str else ("45分" if "45分" in row_str or "四十五分" in row_str else "5分")
                     period = next((str(item) for item in row if "~" in str(item) or "～" in str(item)), "")
                     
-                    # 判斷目標日期是否落在處置期間內
                     is_active = False
                     if "~" in period or "～" in period:
                         parts = re.split(r'[~～]', period)
@@ -164,7 +175,6 @@ def fetch_official_announcements(target_date):
                         if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
     except: pass
 
-    # 上櫃 OpenAPI
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
@@ -240,7 +250,6 @@ st.divider()
 if start_btn:
     date_str = target_date.strftime('%Y-%m-%d')
     
-    # 時光鎖定系統 (Time Lock)：確保當日盤後才允許查詢
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     if target_date == tw_now.date() and tw_now.hour < 17:
         st.warning("⏳ 今日盤後資料通常於下午 17:30 後發布，目前尚未更新！\n\n⚠️ 系統已自動攔截查詢，請於 17:30 後再試。")
@@ -272,7 +281,6 @@ if start_btn:
                     if new_stocks:
                         try: 
                             supabase.table("stock_info").upsert(new_stocks).execute()
-                            # 🌟 核心修復：寫入資料庫後，強制清除記憶體快取，保證下次讀取為中文！
                             get_stock_info_from_db.clear()
                         except: pass
             
