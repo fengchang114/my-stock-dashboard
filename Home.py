@@ -30,24 +30,34 @@ except Exception as e:
 DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
 
 # ==========================================
-# 從 Supabase 抓取全台股清單與後綴
+# 從 Supabase 抓取全台股清單與後綴 (突破千筆限制版)
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_stock_info_from_db():
     """
     從 stock_info 資料表抓取代號、名稱與後綴(suffix)
-    回傳字典格式以便快速查詢： { '2317': {'name': '鴻海', 'suffix': '.TW'}, ... }
+    使用分頁機制 (Pagination)，確保 2000+ 檔台股都能完整載入
     """
     stock_dict = {}
     try:
-        response = supabase.table("stock_info").select("stock_id, stock_name, suffix").execute()
-        if response.data:
-            for row in response.data:
-                sid = str(row['stock_id']).strip()
-                stock_dict[sid] = {
-                    'name': str(row['stock_name']).strip(),
-                    'suffix': str(row.get('suffix', '')).strip()
-                }
+        all_data = []
+        step = 1000
+        # 迴圈分批抓取，每次抓 1000 筆，最多抓到 5000 筆為止 (涵蓋台股綽綽有餘)
+        for i in range(0, 5000, step):
+            response = supabase.table("stock_info").select("stock_id, stock_name, suffix").range(i, i + step - 1).execute()
+            all_data.extend(response.data)
+            
+            # 如果這次抓到的資料少於 1000 筆，代表已經抓到底了，提早結束迴圈
+            if len(response.data) < step:
+                break
+                
+        # 將完整資料組裝成字典
+        for row in all_data:
+            sid = str(row['stock_id']).strip()
+            stock_dict[sid] = {
+                'name': str(row['stock_name']).strip(),
+                'suffix': str(row.get('suffix', '')).strip()
+            }
     except Exception as e:
         st.error(f"無法載入股票清單: {e}")
     return stock_dict
