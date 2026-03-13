@@ -146,30 +146,37 @@ if "holdings_list" not in st.session_state:
     # 將雲端的字串拆解為乾淨的 List
     st.session_state.holdings_list = [s.strip() for s in raw_str.replace('、', ',').replace('，', ',').split(',') if s.strip()]
 
-# 第一排：搜尋與新增
+# ==========================================
+# 💡 定義 Callback 函式：處理新增與清空邏輯
+# ==========================================
+def add_selected_stock():
+    # 直接從 session_state 讀取目前選單的值
+    selected = st.session_state.stock_selector
+    if selected:
+        if selected not in st.session_state.holdings_list:
+            st.session_state.holdings_list.append(selected)
+            st.toast(f"✅ 已將 {selected} 加入清單！")
+        else:
+            st.toast(f"⚠️ {selected} 已經在清單中囉！")
+        
+        # 在 Callback 階段清空選單狀態，絕對不會報錯！
+        st.session_state.stock_selector = ""
+
+# ==========================================
+# 第一排：搜尋與新增介面
+# ==========================================
 col_search, col_add = st.columns([4, 1])
 with col_search:
-    selected_stock = st.selectbox(
+    # 這裡不需要把結果指派給變數了，直接讓它綁定 key 即可
+    st.selectbox(
         "🔍 搜尋並新增持股 (請輸入代號或名稱)：", 
         options=[""] + all_stock_options,
-        key="stock_selector"  # 👈 關鍵 1：綁定一個專屬 Key 給這個選單
+        key="stock_selector"
     )
 with col_add:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
-    if st.button("➕ 新增至清單", use_container_width=True):
-        if selected_stock:
-            if selected_stock not in st.session_state.holdings_list:
-                st.session_state.holdings_list.append(selected_stock)
-                # 改用 toast 浮動提示，才不會因為下面的 rerun 而閃退消失
-                st.toast(f"✅ 已將 {selected_stock} 加入清單！")
-            else:
-                st.toast(f"⚠️ {selected_stock} 已經在清單中囉！")
-            
-            # 👈 關鍵 2：強制將選單狀態設為空字串，達到「清空」的效果
-            st.session_state.stock_selector = "" 
-            
-            # 👈 關鍵 3：立刻重整畫面，讓下方的標籤列與圖表同步更新
-            st.rerun()
+    # 使用 on_click 綁定剛剛寫好的函式，也不需要自己寫 st.rerun() 了，按鈕按完會自動重整
+    st.button("➕ 新增至清單", use_container_width=True, on_click=add_selected_stock)
 
 # 第二排：持股標籤顯示 (取代原本的 text_input) 與儲存
 col_list, col_date, col_save = st.columns([5, 2, 2])
@@ -363,3 +370,4 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+
