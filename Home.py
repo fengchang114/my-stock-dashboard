@@ -18,15 +18,14 @@ st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon=
 HOLDINGS_FILE = "my_holdings.txt"
 NAME_CACHE_FILE = "name_cache.json" 
 
-# 🌟 預設持股清單 (已更新為最新配置)
-DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 1717 長興, 1802 台玻, 2317 鴻海, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
+# 🌟 預設持股清單
+DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 1717 長興, 1802 台玻, 2317 鴻海, 4952 凌通"
 
 COMMON_ETF_MAP = {
     "^TWII": "加權指數", "^TWOII": "櫃買指數",
     "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
     "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
-    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年",
-    "009816": "凱基台灣Top50"
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
 }
 
 def load_holdings():
@@ -73,23 +72,6 @@ def load_local_official_dictionary():
                     if c and n: name_map[c] = n
         except: pass
     return name_map
-
-# ==========================================
-# ⚠️ 注意/處置股抓取模組 (請整合之前的系統邏輯)
-# ==========================================
-@st.cache_data(ttl=3600)
-def fetch_alert_stocks():
-    """
-    這裡負責回傳當日的注意與處置股字典。
-    格式範例：{"2317": "注意", "1802": "處置"}
-    👉 請將我們之前開發的「上市櫃注意/處置股監測系統」爬蟲邏輯貼到這裡取代測試資料！
-    """
-    # 這是供儀表板測試用的假資料，請替換為真實爬蟲回傳的字典
-    dummy_alert_data = {
-        # "2317": "注意", 
-        # "1802": "處置"
-    }
-    return dummy_alert_data
 
 # ==========================================
 # 工具與抓取函式
@@ -149,7 +131,6 @@ if save_btn:
 
 official_name_map = load_local_official_dictionary()
 name_cache = load_name_cache()
-alert_dict = fetch_alert_stocks() # 取得注意/處置股名單
 cache_updated = False
 
 # 🌟 智慧防呆解析引擎
@@ -186,9 +167,6 @@ with st.spinner('從本地字典庫調閱資料與精算行情中...'):
         name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or official_name_map.get(code) or f"({code})"
         df_k = fetch_kline_data(code)
         
-        # 確認該檔股票是否在注意或處置名單中
-        stock_status = alert_dict.get(code, "") 
-        
         if not df_k.empty:
             if target_ts in df_k.index:
                 k_target = df_k.loc[target_ts]
@@ -205,7 +183,6 @@ with st.spinner('從本地字典庫調閱資料與精算行情中...'):
                 vol = int(k_target['Volume'] / 1000)
                 
                 final_rows.append({
-                    '狀態': stock_status, # 新增狀態欄位
                     '代碼': code, '商品': name,
                     '開盤': round(float(k_target['Open']), 2), '最高': round(float(k_target['High']), 2),
                     '最低': round(float(k_target['Low']), 2), '收盤': round(price, 2), 
@@ -223,46 +200,43 @@ if final_rows:
             if col == '收盤':
                 css += "font-weight: bold; "
             
-            # 紅綠漲跌色
             if col in ['漲跌', '漲幅%']:
                 if row[col] > 0:
                     css += "color: #ff4b4b; " 
                 elif row[col] < 0:
                     css += "color: #1e7b1e; " 
             
-            # 漲跌停底色提示
             if row['漲幅%'] >= 9.85:
                 css += "background-color: rgba(255, 75, 75, 0.2); "
             elif row['漲幅%'] <= -9.85:
                 css += "background-color: rgba(0, 136, 0, 0.15); " 
                 
-            # 🌟 新增：注意/處置股的專屬醒目底色
-            if col == '狀態':
-                if row['狀態'] == '處置':
-                    css += "background-color: #ff4b4b; color: white; font-weight: bold; border-radius: 4px;"
-                elif row['狀態'] == '注意':
-                    css += "background-color: #ffc107; color: black; font-weight: bold; border-radius: 4px;"
-                    
             styles.append(css)
         return styles
 
+    # 🌟 透過 Pandas 的 set_table_styles 與 set_table_attributes 直接從底層灌入樣式
     styled_df = df_final.style.apply(custom_style, axis=1)\
                       .format({"開盤": "{:.2f}", "最高": "{:.2f}", "最低": "{:.2f}", 
                                "收盤": "{:.2f}", "漲跌": "{:.2f}", "漲幅%": "{:.2f} %", "成交量(張)": "{:.0f}"})\
                       .hide(axis="index")\
                       .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
                       .set_table_styles([
+                          # 這裡可以盡情設定您要的字體大小，22px 或 30px 都絕對會生效！
                           {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
                           {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
                       ])
     
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
     
+    # 🌟 捨棄 st.table()！直接把格式化好的 HTML 畫布丟給瀏覽器強制渲染！
     html_table = styled_df.to_html()
     st.markdown(html_table, unsafe_allow_html=True)
 
+    # --- 下半部 K 線圖 ---
+
+    # --- 下半部 K 線圖 ---
+    # ... (下方 K 線圖區塊維持原樣即可)
     st.divider()
-    # 圖表分析區塊不變...
     selected_stock_str = st.selectbox("圖表分析：", [f"{r['代碼']} {r['商品']}" for _, r in df_final.iterrows()])
     if selected_stock_str:
         t_code = selected_stock_str.split()[0]
@@ -289,3 +263,4 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+
