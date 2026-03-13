@@ -108,6 +108,9 @@ def fetch_official_announcements(target_date, silent=False):
     notice_set, punish_db, name_dict = set(), {}, {}
     is_data_updated = False 
 
+    # ==========================
+    # 🏢 上市 (TWSE) 區塊 (保留 4~6 碼)
+    # ==========================
     try:
         url_n = f"https://www.twse.com.tw/rwd/zh/announcement/notice?startDate={today_str_twse}&endDate={today_str_twse}&response=json"
         res_n = requests.get(url_n, timeout=10, headers=headers, verify=False)
@@ -158,17 +161,24 @@ def fetch_official_announcements(target_date, silent=False):
                             if start_d <= roc_date_str <= end_d: is_active = True
                     if is_active:
                         punish_db[code] = {"期間": period, "分盤": m_time}
-                        if name: name_dict[code] = {"名稱": name, "市場": "上市", "suffix": ".TW"}
+                        if name: name_dict[code] = {"名稱": name, "上市", "suffix": ".TW"}
     except: pass
 
+    # ==========================
+    # 🏪 上櫃 (TPEX) 區塊 (🌟 嚴格限制 4 碼純數字，剔除可轉債)
+    # ==========================
     try:
         res_tp = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_disposal_information", headers=headers, timeout=10, verify=False)
         if res_tp.status_code == 200 and res_tp.text.strip():
             for row in res_tp.json():
                 if str(row.get("Date")) == roc_date_str: is_data_updated = True
+                
                 code = str(row.get("SecuritiesCompanyCode", "")).strip()
                 name = str(row.get("CompanyName", "")).strip()
-                if not re.match(r'^[0-9A-Z]{4,6}$', code): continue
+                
+                # 🌟 關鍵修改 1：嚴格限制 4 碼
+                if not re.match(r'^\d{4}$', code): continue
+                
                 period = str(row.get("DispositionPeriod", ""))
                 is_active = False
                 if "~" in period or "～" in period:
@@ -190,7 +200,9 @@ def fetch_official_announcements(target_date, silent=False):
                     is_data_updated = True
                     code = str(row.get("SecuritiesCompanyCode", "")).strip()
                     name = str(row.get("CompanyName", "")).strip()
-                    if re.match(r'^[0-9A-Z]{4,6}$', code): 
+                    
+                    # 🌟 關鍵修改 2：嚴格限制 4 碼
+                    if re.match(r'^\d{4}$', code): 
                         notice_set.add(code)
                         if name: name_dict[code] = {"名稱": name, "市場": "上櫃", "suffix": ".TWO"}
     except: 
