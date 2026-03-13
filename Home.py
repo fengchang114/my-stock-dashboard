@@ -4,8 +4,7 @@ import requests
 import datetime
 import urllib3
 import re
-import os
-import json
+from supabase import create_client, Client
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -13,24 +12,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="我的投資儀表板", layout="wide", page_icon="🏠")
 
 # ==========================================
-# 迷你資料庫：存取持股與動態記憶
+# 雲端資料庫：Supabase 初始化
 # ==========================================
-# ==========================================
-# 雲端資料庫：Supabase 存取持股與動態記憶
-# ==========================================
-from supabase import create_client, Client
-
-# 🌟 預設持股清單 
-DEFAULT_HOLDINGS = "^TWII 加權指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
-
-COMMON_ETF_MAP = {
-    "^TWII": "加權指數", "^TWOII": "櫃買指數",
-    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
-    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
-    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
-}
-
-# 初始化 Supabase 連線 (使用 cache_resource 避免重複連線)
 @st.cache_resource
 def init_connection():
     url = st.secrets["SUPABASE_URL"]
@@ -41,10 +24,47 @@ try:
     supabase: Client = init_connection()
 except Exception as e:
     st.error(f"⚠️ Supabase 連線失敗，請檢查 .streamlit/secrets.toml 設定。錯誤訊息: {e}")
+    st.stop()
 
+# 🌟 預設持股清單
+DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
+
+# ==========================================
+# 從 Supabase 抓取全台股清單與後綴
+# ==========================================
+@st.cache_data(ttl=86400)
+def load_stock_info_from_db():
+    """
+    從 stock_info 資料表抓取代號、名稱與後綴(suffix)
+    回傳字典格式以便快速查詢： { '2317': {'name': '鴻海', 'suffix': '.TW'}, ... }
+    """
+    stock_dict = {}
+    try:
+        response = supabase.table("stock_info").select("stock_id, stock_name, suffix").execute()
+        if response.data:
+            for row in response.data:
+                sid = str(row['stock_id']).strip()
+                stock_dict[sid] = {
+                    'name': str(row['stock_name']).strip(),
+                    'suffix': str(row.get('suffix', '')).strip()
+                }
+    except Exception as e:
+        st.error(f"無法載入股票清單: {e}")
+    return stock_dict
+
+# 常見 ETF 或指數的備用對應
+COMMON_ETF_MAP = {
+    "^TWII": "加權指數", "^TWOII": "櫃買指數",
+    "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
+    "00919": "群益台灣精選高息", "00929": "復華台灣科技優息", "00940": "元大台灣價值高息",
+    "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
+}
+
+# ==========================================
+# 持股設定存取 (Supabase user_settings 表)
+# ==========================================
 def load_holdings():
     try:
-        # 讀取 user_settings 表中的持股資料
         response = supabase.table("user_settings").select("value").eq("key", "holdings").execute()
         if response.data:
             return response.data[0]["value"]
@@ -54,59 +74,26 @@ def load_holdings():
 
 def save_holdings(holdings_str):
     try:
-        # 使用 upsert：存在就更新，不存在就新增
         supabase.table("user_settings").upsert({"key": "holdings", "value": holdings_str}).execute()
     except Exception as e:
         st.error(f"儲存持股至 Supabase 失敗: {e}")
 
-def load_name_cache():
-    try:
-        response = supabase.table("stock_name_cache").select("code", "name").execute()
-        return {row["code"]: row["name"] for row in response.data}
-    except Exception as e:
-        return {}
-
-def save_name_cache(cache_dict):
-    if not cache_dict: return
-    # 將 dict 轉為 Supabase upsert 支援的 list of dicts 格式
-    data_to_upsert = [{"code": k, "name": v} for k, v in cache_dict.items()]
-    try:
-        supabase.table("stock_name_cache").upsert(data_to_upsert).execute()
-    except Exception as e:
-        pass # 背景快取更新失敗可略過，不打斷使用者體驗
-
 # ==========================================
-# 讀取本地官方名冊
-# ==========================================
-@st.cache_data(ttl=86400) 
-def load_local_official_dictionary():
-    name_map = {}
-    if os.path.exists("STOCK_DAY_ALL.json"):
-        try:
-            with open("STOCK_DAY_ALL.json", "r", encoding="utf-8") as f:
-                for row in json.load(f):
-                    c, n = str(row.get('Code', '')).strip(), str(row.get('Name', '')).strip()
-                    if c and n: name_map[c] = n
-        except: pass
-
-    if os.path.exists("dlyquote.json"):
-        try:
-            with open("dlyquote.json", "r", encoding="utf-8") as f:
-                for row in json.load(f):
-                    c, n = str(row.get('SecuritiesCompanyCode', '')).strip(), str(row.get('CompanyName', '')).strip()
-                    if c and n: name_map[c] = n
-        except: pass
-    return name_map
-
-# ==========================================
-# 工具與抓取函式
+# 工具與抓取函式 (精準 suffix 優化版)
 # ==========================================
 @st.cache_data(ttl=3600)
-def fetch_kline_data(ticker):
+def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    suffixes = ['.TW', '.TWO'] if not ticker.startswith('^') else ['']
     
-    for suffix in suffixes:
+    # 如果有明確的 suffix，就只抓一次；否則維持盲猜邏輯
+    if ticker.startswith('^'):
+        suffixes_to_try = ['']
+    elif specific_suffix is not None:
+        suffixes_to_try = [specific_suffix]
+    else:
+        suffixes_to_try = ['.TW', '.TWO']
+    
+    for suffix in suffixes_to_try:
         try:
             url = f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}{suffix}?range=6mo&interval=1d"
             res = requests.get(url, headers=headers, timeout=5).json()
@@ -127,7 +114,8 @@ def fetch_kline_data(ticker):
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0: df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
                 return df
-        except: continue
+        except: 
+            continue
     return pd.DataFrame()
 
 # ==========================================
@@ -136,32 +124,64 @@ def fetch_kline_data(ticker):
 st.title("🏠 我的投資儀表板")
 st.divider()
 
-current_saved_holdings = load_holdings()
+# 1. 載入全台股字典建立選單
+stock_db_dict = load_stock_info_from_db()
+all_stock_options = [f"{k} {v['name']}" for k, v in stock_db_dict.items()]
 
-col1, col2, col3 = st.columns([4, 1, 1])
-with col1:
-    user_stocks_input = st.text_input("📝 持股清單 (支援防呆輸入，空格/逗號皆可)：", value=current_saved_holdings)
-with col2:
+# 2. 狀態管理：使用 session_state 暫存持股清單
+if "current_holdings" not in st.session_state:
+    st.session_state.current_holdings = load_holdings()
+
+# 第一排：搜尋與新增
+col_search, col_add = st.columns([4, 1])
+with col_search:
+    selected_stock = st.selectbox(
+        "🔍 搜尋並新增持股 (請輸入代號或名稱)：", 
+        options=[""] + all_stock_options,
+        index=0
+    )
+with col_add:
+    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+    if st.button("➕ 新增至清單", use_container_width=True):
+        if selected_stock:
+            if selected_stock not in st.session_state.current_holdings:
+                if st.session_state.current_holdings.strip():
+                    st.session_state.current_holdings += f", {selected_stock}"
+                else:
+                    st.session_state.current_holdings = selected_stock
+                st.success(f"已將 {selected_stock} 加入下方清單！")
+                st.rerun()
+            else:
+                st.warning(f"{selected_stock} 已經在清單中囉！")
+
+# 第二排：當前持股顯示與儲存
+col_list, col_date, col_save = st.columns([5, 2, 2])
+with col_list:
+    user_stocks_input = st.text_input(
+        "📝 目前持股清單 (可手動修改/刪除)：", 
+        value=st.session_state.current_holdings
+    )
+    st.session_state.current_holdings = user_stocks_input 
+
+with col_date:
     selected_date = st.date_input("選擇日期", datetime.date.today())
-with col3:
+
+with col_save:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     save_btn = st.button("💾 儲存為預設", use_container_width=True)
+
+if save_btn:
+    save_holdings(st.session_state.current_holdings)
+    st.success("✅ 持股清單已成功存檔至雲端！")
 
 if selected_date.weekday() >= 5:
     st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
 
-if save_btn:
-    save_holdings(user_stocks_input)
-    st.success("✅ 持股清單已成功存檔！")
-
-official_name_map = load_local_official_dictionary()
-name_cache = load_name_cache()
-cache_updated = False
-
 # 🌟 智慧防呆解析引擎
-raw_str = user_stocks_input.replace('、', ',').replace('，', ',')
-pairs = [s.strip() for s in raw_str.split(',')]
+raw_str = st.session_state.current_holdings.replace('、', ',').replace('，', ',')
+pairs = [s.strip() for s in raw_str.split(',') if s.strip()]
 my_codes = []
+final_parsed_names = {} 
 
 for p in pairs:
     tokens = p.split()
@@ -179,18 +199,25 @@ for p in pairs:
     if current_codes and name_tokens:
         target_code = current_codes[-1]
         name_part = " ".join(name_tokens)
-        name_cache[target_code] = name_part
-        cache_updated = True
-
-if cache_updated: save_name_cache(name_cache)
+        final_parsed_names[target_code] = name_part
+    elif current_codes:
+        target_code = current_codes[-1]
+        final_parsed_names[target_code] = ""
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
-with st.spinner('從本地字典庫調閱資料與精算行情中...'):
+with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
-        name = name_cache.get(code) or COMMON_ETF_MAP.get(code) or official_name_map.get(code) or f"({code})"
-        df_k = fetch_kline_data(code)
+        # 決定名稱與 suffix，優先從 Supabase 資料庫取用
+        db_info = stock_db_dict.get(code, {})
+        db_name = db_info.get('name')
+        db_suffix = db_info.get('suffix')
+        
+        name = final_parsed_names.get(code) or db_name or COMMON_ETF_MAP.get(code) or f"({code})"
+        
+        # 傳入 db_suffix 加速抓取
+        df_k = fetch_kline_data(code, specific_suffix=db_suffix)
         
         if not df_k.empty:
             if target_ts in df_k.index:
@@ -239,35 +266,31 @@ if final_rows:
             styles.append(css)
         return styles
 
-    # 🌟 透過 Pandas 的 set_table_styles 與 set_table_attributes 直接從底層灌入樣式
     styled_df = df_final.style.apply(custom_style, axis=1)\
-                      .format({"開盤": "{:.2f}", "最高": "{:.2f}", "最低": "{:.2f}", 
-                               "收盤": "{:.2f}", "漲跌": "{:.2f}", "漲幅%": "{:.2f} %", "成交量(張)": "{:.0f}"})\
-                      .hide(axis="index")\
-                      .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
-                      .set_table_styles([
-                          # 這裡可以盡情設定您要的字體大小，22px 或 30px 都絕對會生效！
-                          {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
-                          {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
-                      ])
+                  .format({"開盤": "{:.2f}", "最高": "{:.2f}", "最低": "{:.2f}", 
+                           "收盤": "{:.2f}", "漲跌": "{:.2f}", "漲幅%": "{:.2f} %", "成交量(張)": "{:.0f}"})\
+                  .hide(axis="index")\
+                  .set_table_attributes('style="width: 100%; border-collapse: collapse; text-align: center;"')\
+                  .set_table_styles([
+                      {'selector': 'th', 'props': [('font-size', '18px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '2px solid #555')]},
+                      {'selector': 'td', 'props': [('font-size', '16px'), ('text-align', 'center'), ('padding', '12px'), ('border-bottom', '1px solid #ddd')]}
+                  ])
     
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
     
-    # 🌟 捨棄 st.table()！直接把格式化好的 HTML 畫布丟給瀏覽器強制渲染！
     html_table = styled_df.to_html()
     st.markdown(html_table, unsafe_allow_html=True)
 
-    # --- 下半部 K 線圖 ---
-
-    # --- 下半部 K 線圖 ---
-    # ... (下方 K 線圖區塊維持原樣即可)
     st.divider()
     selected_stock_str = st.selectbox("圖表分析：", [f"{r['代碼']} {r['商品']}" for _, r in df_final.iterrows()])
     if selected_stock_str:
         t_code = selected_stock_str.split()[0]
         t_name = selected_stock_str.split()[1]
         
-        df_k = fetch_kline_data(t_code)
+        # 繪圖時也使用資料庫抓到的 suffix 加速
+        db_suffix = stock_db_dict.get(t_code, {}).get('suffix')
+        df_k = fetch_kline_data(t_code, specific_suffix=db_suffix)
+        
         if not df_k.empty:
             df_k['MA5'] = df_k['Close'].rolling(5).mean()
             df_k['MA20'] = df_k['Close'].rolling(20).mean()
@@ -288,7 +311,3 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
-
-
-
-
