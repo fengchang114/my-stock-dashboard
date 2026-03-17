@@ -89,14 +89,12 @@ def save_holdings(holdings_str):
         st.error(f"儲存持股至 Supabase 失敗: {e}")
 
 # ==========================================
-# 工具與抓取函式 (終極時區與防呆版)
+# 工具與抓取函式 (終極報價校正版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 🚀 修正 1：嚴格判斷 suffix！
-    # 如果資料庫傳來空字串 ("")，會判定為 False，強制退回使用預設的台股後綴 (.TW / .TWO)
     if ticker.startswith('^'):
         suffixes_to_try = ['']
     elif specific_suffix: 
@@ -121,23 +119,28 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     'Volume': quote['volume']
                 })
                 
-                # 🚀 修正 2：終極時區校正！
-                # 先將 Yahoo 的時間戳記強制轉為真正的「台北時間 (Asia/Taipei)」再進行歸零。
-                # 這樣絕對不會發生「兩天擠在同一天」被誤刪的慘劇！
                 df.index = pd.to_datetime(result[0]['timestamp'], unit='s', utc=True)
                 df.index = df.index.tz_convert('Asia/Taipei').tz_localize(None).normalize()
                 
-                # 處理重複日期與空值
+                # 處理重複日期
                 df = df[~df.index.duplicated(keep='last')]
-                df = df.ffill().dropna()
+                # 🚨 關鍵防呆：先刪除沒有收盤價的空包彈日子，再做 ffill！
+                df = df.dropna(subset=['Close']).ffill()
                 
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0: df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
-                return df
+                
+                # 💎 提取 Yahoo 最準確的「即時真實報價」與「昨日參考價」打包回傳
+                meta_data = {
+                    'current_price': meta.get('regularMarketPrice'),
+                    'prev_close': meta.get('chartPreviousClose')
+                }
+                
+                return df, meta_data
         except: 
             continue
-    return pd.DataFrame()
+    return pd.DataFrame(), {}
 
 # ==========================================
 # 介面與核心邏輯
@@ -251,15 +254,14 @@ target_ts = pd.Timestamp(selected_date).normalize()
 with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
-        # 決定名稱與 suffix，優先從 Supabase 資料庫取用
         db_info = stock_db_dict.get(code, {})
         db_name = db_info.get('name')
         db_suffix = db_info.get('suffix')
         
         name = final_parsed_names.get(code) or db_name or COMMON_ETF_MAP.get(code) or f"({code})"
         
-        # 傳入 db_suffix 加速抓取
-        df_k = fetch_kline_data(code, specific_suffix=db_suffix)
+        # 🚀 接收回傳的 DataFrame 與 真實報價字典
+        df_k, meta_data = fetch_kline_data(code, specific_suffix=db_suffix)
         
         if not df_k.empty:
             if target_ts in df_k.index:
@@ -270,8 +272,18 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
                 past_data = df_k.iloc[:-1]
             
             if not past_data.empty:
-                yest_close = past_data.iloc[-1]['Close']
-                price = float(k_target['Close'])
+                # 💎 終極防護：判斷是否為「最新交易日」
+                is_latest_day = (target_ts >= df_k.index[-1])
+                
+                if is_latest_day and meta_data.get('prev_close'):
+                    # 如果是看最新行情，強制吃 Yahoo Meta 的絕對真實數據！
+                    # 這樣能 100% 免疫 K 線陣列漏天數、除權息、減資導致的算錯問題
+                    yest_close = float(meta_data['prev_close'])
+                    price = float(meta_data.get('current_price') or k_target['Close'])
+                else:
+                    yest_close = float(past_data.iloc[-1]['Close'])
+                    price = float(k_target['Close'])
+                
                 change = price - yest_close
                 pct = (change / yest_close) * 100
                 vol = int(k_target['Volume'] / 1000)
@@ -331,7 +343,7 @@ if final_rows:
         
         # 繪圖時也使用資料庫抓到的 suffix 加速
         db_suffix = stock_db_dict.get(t_code, {}).get('suffix')
-        df_k = fetch_kline_data(t_code, specific_suffix=db_suffix)
+        df_k, _ = fetch_kline_data(t_code, specific_suffix=db_suffix)
         
         if not df_k.empty:
             df_k['MA5'] = df_k['Close'].rolling(5).mean()
