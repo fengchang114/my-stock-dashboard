@@ -92,10 +92,13 @@ def save_holdings(holdings_str):
 # 工具與抓取函式 (精準 suffix 優化版)
 # ==========================================
 @st.cache_data(ttl=3600)
+# ==========================================
+# 工具與抓取函式 (精準 suffix 優化版)
+# ==========================================
+@st.cache_data(ttl=3600)
 def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 如果有明確的 suffix，就只抓一次；否則維持盲猜邏輯
     if ticker.startswith('^'):
         suffixes_to_try = ['']
     elif specific_suffix is not None:
@@ -111,7 +114,7 @@ def fetch_kline_data(ticker, specific_suffix=None):
             if result:
                 meta = result[0].get('meta', {})
                 quote = result[0]['indicators']['quote'][0]
-                # 🚀 修正點 1：全部統一使用 quote 內的真實報價
+                
                 df = pd.DataFrame({
                     'Close': quote['close'], 
                     'Open': quote['open'], 
@@ -119,14 +122,12 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     'Low': quote['low'],
                     'Volume': quote['volume']
                 })
-                # 🚀 核心修正：刪除 + pd.Timedelta(hours=8)
-                # 讓 UTC 時間直接 normalize 歸零，確保每一天都在正確的格子裡
+                
+                # 🚨 關鍵修正：已移除 + pd.Timedelta(hours=8)，直接將 UTC 日期歸零
                 df.index = pd.to_datetime(result[0]['timestamp'], unit='s').normalize()
-                # df = df.dropna()
-                # 🚀 新增這行：如果同一天有多筆資料，強制只保留最後一筆 (最新收盤價)
+                
+                # 處理重複日期與空值
                 df = df[~df.index.duplicated(keep='last')]
-                # 🚀 修正點 2：加入 ffill()。有時 Yahoo 某天沒資料會回傳 NaN，
-                # 用 ffill (向下填補) 可以避免 dropna 把最近的交易日整筆刪掉，導致抓錯昨收。
                 df = df.ffill().dropna()
                 
                 if not df.empty and df['Volume'].iloc[-1] == 0:
@@ -223,34 +224,6 @@ my_codes = []
 final_parsed_names = {} 
 
 # 直接迴圈處理 List，省去字串切割的麻煩
-for p in st.session_state.holdings_list:
-    tokens = p.split()
-    current_codes = []
-    name_tokens = []
-    
-    for t in tokens:
-        if re.match(r'^\^?[A-Za-z]?\d{4,6}[A-Za-z]?$', t) or t in COMMON_ETF_MAP:
-            current_codes.append(t)
-            if t not in my_codes:
-                my_codes.append(t)
-        else:
-            name_tokens.append(t)
-            
-    if current_codes and name_tokens:
-        target_code = current_codes[-1]
-        name_part = " ".join(name_tokens)
-        final_parsed_names[target_code] = name_part
-    elif current_codes:
-        target_code = current_codes[-1]
-        final_parsed_names[target_code] = ""
-
-# ==========================================
-# 🌟 智慧防呆解析引擎 (配合 List 架構更新)
-# ==========================================
-my_codes = []
-final_parsed_names = {} 
-
-# 直接迴圈處理 st.session_state.holdings_list，不再需要 replace 和 split 字串了！
 for p in st.session_state.holdings_list:
     tokens = p.split()
     current_codes = []
