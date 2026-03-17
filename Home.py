@@ -111,14 +111,21 @@ def fetch_kline_data(ticker, specific_suffix=None):
             if result:
                 meta = result[0].get('meta', {})
                 quote = result[0]['indicators']['quote'][0]
+                # 🚀 修正點 1：全部統一使用 quote 內的真實報價
                 df = pd.DataFrame({
-                    'Close': result[0]['indicators']['adjclose'][0]['adjclose'],
-                    'Open': quote['open'], 'High': quote['high'], 'Low': quote['low'],
+                    'Close': quote['close'], 
+                    'Open': quote['open'], 
+                    'High': quote['high'], 
+                    'Low': quote['low'],
                     'Volume': quote['volume']
                 })
                 df.index = pd.to_datetime(result[0]['timestamp'], unit='s') + pd.Timedelta(hours=8)
                 df.index = df.index.normalize()
-                df = df.dropna()
+                # df = df.dropna()
+
+                # 🚀 修正點 2：加入 ffill()。有時 Yahoo 某天沒資料會回傳 NaN，
+                # 用 ffill (向下填補) 可以避免 dropna 把最近的交易日整筆刪掉，導致抓錯昨收。
+                df = df.ffill().dropna()
                 
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
@@ -370,4 +377,3 @@ else:
         st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
     else:
         st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
-
