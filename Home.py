@@ -119,8 +119,9 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     'Low': quote['low'],
                     'Volume': quote['volume']
                 })
-                df.index = pd.to_datetime(result[0]['timestamp'], unit='s') + pd.Timedelta(hours=8)
-                df.index = df.index.normalize()
+                # 🚀 核心修正：刪除 + pd.Timedelta(hours=8)
+                # 讓 UTC 時間直接 normalize 歸零，確保每一天都在正確的格子裡
+                df.index = pd.to_datetime(result[0]['timestamp'], unit='s').normalize()
                 # df = df.dropna()
                 # 🚀 新增這行：如果同一天有多筆資料，強制只保留最後一筆 (最新收盤價)
                 df = df[~df.index.duplicated(keep='last')]
