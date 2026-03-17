@@ -54,7 +54,6 @@ def load_stock_info_from_db():
         st.error(f"無法載入股票清單: {e}")
     return stock_dict
 
-# 常見 ETF 或指數的備用對應
 COMMON_ETF_MAP = {
     "^TWII": "加權指數", "^TWOII": "櫃買指數",
     "0050": "元大台灣50", "0056": "元大高股息", "00878": "國泰永續高股息", 
@@ -81,12 +80,11 @@ def save_holdings(holdings_str):
         st.error(f"儲存持股至 Supabase 失敗: {e}")
 
 # ==========================================
-# 工具與抓取函式 (終極報價校正版)
+# 工具與抓取函式
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    
     if ticker.startswith('^'):
         suffixes_to_try = ['']
     elif specific_suffix: 
@@ -125,7 +123,6 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     'current_price': meta.get('regularMarketPrice'),
                     'prev_close': meta.get('chartPreviousClose')
                 }
-                
                 return df, meta_data
         except: 
             continue
@@ -156,11 +153,7 @@ def add_selected_stock():
 
 col_search, col_add = st.columns([4, 1])
 with col_search:
-    st.selectbox(
-        "🔍 搜尋並新增持股 (請輸入代號或名稱)：", 
-        options=[""] + all_stock_options,
-        key="stock_selector"
-    )
+    st.selectbox("🔍 搜尋並新增持股 (請輸入代號或名稱)：", options=[""] + all_stock_options, key="stock_selector")
 with col_add:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     st.button("➕ 新增至清單", use_container_width=True, on_click=add_selected_stock)
@@ -168,11 +161,7 @@ with col_add:
 col_list, col_date, col_save = st.columns([5, 2, 2])
 with col_list:
     safe_options = list(set(all_stock_options + st.session_state.holdings_list))
-    updated_list = st.multiselect(
-        "🏷️ 目前持股清單 (點選 'x' 可移除)：", 
-        options=safe_options, 
-        default=st.session_state.holdings_list
-    )
+    updated_list = st.multiselect("🏷️ 目前持股清單 (點選 'x' 可移除)：", options=safe_options, default=st.session_state.holdings_list)
     st.session_state.holdings_list = updated_list
 
 with col_date:
@@ -188,9 +177,6 @@ with col_save:
 if selected_date.weekday() >= 5:
     st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
 
-# ==========================================
-# 🌟 智慧防呆解析引擎
-# ==========================================
 my_codes = []
 final_parsed_names = {} 
 
@@ -198,7 +184,6 @@ for p in st.session_state.holdings_list:
     tokens = p.split()
     current_codes = []
     name_tokens = []
-    
     for t in tokens:
         if re.match(r'^\^?[A-Za-z]?\d{4,6}[A-Za-z]?$', t) or t in COMMON_ETF_MAP:
             current_codes.append(t)
@@ -206,7 +191,6 @@ for p in st.session_state.holdings_list:
                 my_codes.append(t)
         else:
             name_tokens.append(t)
-            
     if current_codes and name_tokens:
         target_code = current_codes[-1]
         name_part = " ".join(name_tokens)
@@ -223,7 +207,6 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
         db_info = stock_db_dict.get(code, {})
         db_name = db_info.get('name')
         db_suffix = db_info.get('suffix')
-        
         name = final_parsed_names.get(code) or db_name or COMMON_ETF_MAP.get(code) or f"({code})"
         df_k, meta_data = fetch_kline_data(code, specific_suffix=db_suffix)
         
@@ -239,26 +222,28 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
                 is_latest_day = (target_ts >= df_k.index[-1])
                 
                 # -------------------------------------------------------------------
-                # 🎯 【修復 320% 漲幅 Bug】嚴格過濾離譜的 Yahoo Meta 數據
+                # 🎯 【終極防護】解決鴻海變 0 與華邦電 320% 的完美平衡點
                 # -------------------------------------------------------------------
-                # 以 K 線陣列上一筆真實的收盤價作為基準
                 base_yest_close = float(past_data.iloc[-1]['Close'])
+                price = float(k_target['Close'])
                 
                 if is_latest_day and meta_data.get('prev_close'):
                     meta_prev = float(meta_data['prev_close'])
                     
-                    # 加上防呆防護網：如果 Yahoo Meta 給的數字跟我們 K 線歷史價格落差超過 10%
-                    # 代表 Yahoo API 的該檔股票（如華邦電） Meta 數據壞掉了，直接拋棄它！
-                    if abs(meta_prev - base_yest_close) / base_yest_close < 0.1:
+                    # 防護 1：若 K 線昨收與今日價格落差 > 10% (通常是減資或除權息) -> 強制用 Meta (救回華邦電)
+                    if abs(price - base_yest_close) / base_yest_close > 0.10:
                         yest_close = meta_prev
-                    else:
+                        
+                    # 防護 2：若 Meta 昨收等於今日收盤價，且 K 線昨收並不等於今日收盤價
+                    # 代表 Yahoo 盤後提早把 prev_close 蓋成收盤價了！ -> 捨棄 Meta，改用 K 線昨收 (救回鴻海)
+                    elif meta_prev == price and base_yest_close != price:
                         yest_close = base_yest_close
-                    
-                    # 收盤價統一採用 K 線資料，避免 current_price 也壞掉
-                    price = float(k_target['Close'])
+                        
+                    # 防護 3：一般正常情況，優先用 Meta 吸收微小除權息落差
+                    else:
+                        yest_close = meta_prev
                 else:
                     yest_close = base_yest_close
-                    price = float(k_target['Close'])
                 
                 change = price - yest_close
                 pct = (change / yest_close) * 100
@@ -274,25 +259,16 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
 # --- 顯示持股表格 ---
 if final_rows:
     df_final = pd.DataFrame(final_rows)
-    
     def custom_style(row):
         styles = []
         for col in row.index:
             css = ""
-            if col == '收盤':
-                css += "font-weight: bold; "
-            
+            if col == '收盤': css += "font-weight: bold; "
             if col in ['漲跌', '漲幅%']:
-                if row[col] > 0:
-                    css += "color: #ff4b4b; " 
-                elif row[col] < 0:
-                    css += "color: #1e7b1e; " 
-            
-            if row['漲幅%'] >= 9.85:
-                css += "background-color: rgba(255, 75, 75, 0.2); "
-            elif row['漲幅%'] <= -9.85:
-                css += "background-color: rgba(0, 136, 0, 0.15); " 
-                
+                if row[col] > 0: css += "color: #ff4b4b; " 
+                elif row[col] < 0: css += "color: #1e7b1e; " 
+            if row['漲幅%'] >= 9.85: css += "background-color: rgba(255, 75, 75, 0.2); "
+            elif row['漲幅%'] <= -9.85: css += "background-color: rgba(0, 136, 0, 0.15); " 
             styles.append(css)
         return styles
 
@@ -307,16 +283,14 @@ if final_rows:
                   ])
     
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
-    
     html_table = styled_df.to_html()
     st.markdown(html_table, unsafe_allow_html=True)
-
     st.divider()
+    
     selected_stock_str = st.selectbox("圖表分析：", [f"{r['代碼']} {r['商品']}" for _, r in df_final.iterrows()])
     if selected_stock_str:
         t_code = selected_stock_str.split()[0]
         t_name = selected_stock_str.split()[1]
-        
         db_suffix = stock_db_dict.get(t_code, {}).get('suffix')
         df_k, _ = fetch_kline_data(t_code, specific_suffix=db_suffix)
         
@@ -326,7 +300,7 @@ if final_rows:
             df_k['MA60'] = df_k['Close'].rolling(60).mean()
             
             # -------------------------------------------------------------------
-            # 📈 【主線任務】新增 MACD 指標與改為 3 子圖
+            # 📈 主線任務：新增 MACD 計算與 Plotly 三子圖
             # -------------------------------------------------------------------
             df_k['EMA12'] = df_k['Close'].ewm(span=12, adjust=False).mean()
             df_k['EMA26'] = df_k['Close'].ewm(span=26, adjust=False).mean()
@@ -334,25 +308,24 @@ if final_rows:
             df_k['DEA'] = df_k['DIF'].ewm(span=9, adjust=False).mean()
             df_k['MACD_hist'] = df_k['DIF'] - df_k['DEA']
             
+            # 將原本 2 個子圖改為 3 個，並分配高度比例
             fig = make_subplots(
-                rows=3, cols=1, 
-                shared_xaxes=True, 
-                vertical_spacing=0.04, 
-                row_heights=[0.5, 0.2, 0.3], # 設定子圖高度比例
+                rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
+                row_heights=[0.5, 0.2, 0.3], # K線佔50%，成交量20%，MACD佔30%
                 subplot_titles=(f'{t_name} ({t_code}) 日K與均線', '成交量', 'MACD')
             )
             
-            # Row 1: K 線與均線 (維持原樣)
+            # Row 1: K線與均線
             fig.add_trace(go.Candlestick(x=df_k.index, open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name='K線'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA5'], mode='lines', line=dict(color='purple'), name='MA5'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA20'], mode='lines', line=dict(color='orange'), name='MA20'), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA60'], mode='lines', line=dict(color='blue'), name='MA60'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA5'], mode='lines', line=dict(color='purple', width=1.5), name='MA5'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20'), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60'), row=1, col=1)
             
-            # Row 2: 成交量 (維持原樣)
+            # Row 2: 成交量
             v_colors = ['red' if c >= o else 'green' for c, o in zip(df_k['Close'], df_k['Open'])]
             fig.add_trace(go.Bar(x=df_k.index, y=df_k['Volume'], marker_color=v_colors, name='成交量'), row=2, col=1)
             
-            # Row 3: MACD (新增)
+            # Row 3: MACD
             macd_colors = ['red' if val >= 0 else 'green' for val in df_k['MACD_hist']]
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['DIF'], mode='lines', line=dict(color='black', width=1.5), name='DIF (快)'), row=3, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['DEA'], mode='lines', line=dict(color='blue', width=1.5), name='DEA (慢)'), row=3, col=1)
@@ -362,7 +335,5 @@ if final_rows:
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
-    if selected_date.weekday() < 5:
-        st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
-    else:
-        st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+    if selected_date.weekday() < 5: st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
+    else: st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
