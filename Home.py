@@ -26,12 +26,8 @@ except Exception as e:
     st.error(f"⚠️ Supabase 連線失敗，請檢查 .streamlit/secrets.toml 設定。錯誤訊息: {e}")
     st.stop()
 
-# 🌟 預設持股清單
 DEFAULT_HOLDINGS = "^TWII 加權指數, ^TWOII 櫃買指數, 2317 鴻海, 1802 台玻, 1717 長興, 4952 凌通, 2344 華邦電, 009816 凱基台灣Top50"
 
-# ==========================================
-# 從 Supabase 抓取全台股清單與後綴 (突破千筆限制版)
-# ==========================================
 @st.cache_data(ttl=86400)
 def load_stock_info_from_db():
     stock_dict = {}
@@ -41,15 +37,10 @@ def load_stock_info_from_db():
         for i in range(0, 5000, step):
             response = supabase.table("stock_info").select("stock_id, stock_name, suffix").range(i, i + step - 1).execute()
             all_data.extend(response.data)
-            if len(response.data) < step:
-                break
-                
+            if len(response.data) < step: break
         for row in all_data:
             sid = str(row['stock_id']).strip()
-            stock_dict[sid] = {
-                'name': str(row['stock_name']).strip(),
-                'suffix': str(row.get('suffix', '')).strip()
-            }
+            stock_dict[sid] = {'name': str(row['stock_name']).strip(), 'suffix': str(row.get('suffix', '')).strip()}
     except Exception as e:
         st.error(f"無法載入股票清單: {e}")
     return stock_dict
@@ -61,14 +52,10 @@ COMMON_ETF_MAP = {
     "006208": "富邦台50", "00713": "元大台灣高息低波", "00679B": "元大美債20年"
 }
 
-# ==========================================
-# 持股設定存取 (Supabase user_settings 表)
-# ==========================================
 def load_holdings():
     try:
         response = supabase.table("user_settings").select("value").eq("key", "holdings").execute()
-        if response.data:
-            return response.data[0]["value"]
+        if response.data: return response.data[0]["value"]
     except Exception as e:
         st.warning(f"無法讀取雲端持股，將使用預設值。({e})")
     return DEFAULT_HOLDINGS
@@ -80,17 +67,12 @@ def save_holdings(holdings_str):
         st.error(f"儲存持股至 Supabase 失敗: {e}")
 
 # ==========================================
-# 工具與抓取函式
+# 工具與抓取函式 (純淨 K 線版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
-    if ticker.startswith('^'):
-        suffixes_to_try = ['']
-    elif specific_suffix: 
-        suffixes_to_try = [specific_suffix]
-    else:
-        suffixes_to_try = ['.TW', '.TWO']
+    suffixes_to_try = [''] if ticker.startswith('^') else ([specific_suffix] if specific_suffix else ['.TW', '.TWO'])
     
     for suffix in suffixes_to_try:
         try:
@@ -98,32 +80,25 @@ def fetch_kline_data(ticker, specific_suffix=None):
             res = requests.get(url, headers=headers, timeout=5).json()
             result = res.get('chart', {}).get('result')
             if result:
-                meta = result[0].get('meta', {})
                 quote = result[0]['indicators']['quote'][0]
-                
                 df = pd.DataFrame({
-                    'Close': quote['close'], 
-                    'Open': quote['open'], 
-                    'High': quote['high'], 
-                    'Low': quote['low'],
-                    'Volume': quote['volume']
+                    'Close': quote['close'], 'Open': quote['open'], 
+                    'High': quote['high'], 'Low': quote['low'], 'Volume': quote['volume']
                 })
-                
                 df.index = pd.to_datetime(result[0]['timestamp'], unit='s', utc=True)
                 df.index = df.index.tz_convert('Asia/Taipei').tz_localize(None).normalize()
                 
+                # 你原本寫的這兩行非常強大，已經完美解決了破洞問題！
                 df = df[~df.index.duplicated(keep='last')]
                 df = df.dropna(subset=['Close']).ffill()
                 
+                meta = result[0].get('meta', {})
                 if not df.empty and df['Volume'].iloc[-1] == 0:
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0: df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
                 
-                meta_data = {
-                    'current_price': meta.get('regularMarketPrice'),
-                    'prev_close': meta.get('chartPreviousClose')
-                }
-                return df, meta_data
+                # 回傳空字典避免打亂舊的快取解包
+                return df, {} 
         except: 
             continue
     return pd.DataFrame(), {}
@@ -147,8 +122,6 @@ def add_selected_stock():
         if selected not in st.session_state.holdings_list:
             st.session_state.holdings_list.append(selected)
             st.toast(f"✅ 已將 {selected} 加入清單！")
-        else:
-            st.toast(f"⚠️ {selected} 已經在清單中囉！")
         st.session_state.stock_selector = ""
 
 col_search, col_add = st.columns([4, 1])
@@ -161,43 +134,30 @@ with col_add:
 col_list, col_date, col_save = st.columns([5, 2, 2])
 with col_list:
     safe_options = list(set(all_stock_options + st.session_state.holdings_list))
-    updated_list = st.multiselect("🏷️ 目前持股清單 (點選 'x' 可移除)：", options=safe_options, default=st.session_state.holdings_list)
-    st.session_state.holdings_list = updated_list
-
+    st.session_state.holdings_list = st.multiselect("🏷️ 目前持股清單 (點選 'x' 可移除)：", options=safe_options, default=st.session_state.holdings_list)
 with col_date:
     selected_date = st.date_input("選擇日期", datetime.date.today())
-
 with col_save:
     st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
     if st.button("💾 儲存為預設", use_container_width=True):
-        save_str = ", ".join(st.session_state.holdings_list)
-        save_holdings(save_str)
+        save_holdings(", ".join(st.session_state.holdings_list))
         st.success("✅ 持股清單已成功存檔至雲端！")
 
-if selected_date.weekday() >= 5:
-    st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
+if selected_date.weekday() >= 5: st.warning(f"⚠️ 您選擇的日期 ({selected_date}) 是週末假日，將自動顯示最近一個交易日的資料。")
 
 my_codes = []
 final_parsed_names = {} 
 
 for p in st.session_state.holdings_list:
     tokens = p.split()
-    current_codes = []
-    name_tokens = []
+    current_codes, name_tokens = [], []
     for t in tokens:
         if re.match(r'^\^?[A-Za-z]?\d{4,6}[A-Za-z]?$', t) or t in COMMON_ETF_MAP:
             current_codes.append(t)
-            if t not in my_codes:
-                my_codes.append(t)
-        else:
-            name_tokens.append(t)
-    if current_codes and name_tokens:
-        target_code = current_codes[-1]
-        name_part = " ".join(name_tokens)
-        final_parsed_names[target_code] = name_part
-    elif current_codes:
-        target_code = current_codes[-1]
-        final_parsed_names[target_code] = ""
+            if t not in my_codes: my_codes.append(t)
+        else: name_tokens.append(t)
+    if current_codes and name_tokens: final_parsed_names[current_codes[-1]] = " ".join(name_tokens)
+    elif current_codes: final_parsed_names[current_codes[-1]] = ""
 
 target_ts = pd.Timestamp(selected_date).normalize()
 
@@ -205,12 +165,11 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
     final_rows = []
     for code in my_codes:
         db_info = stock_db_dict.get(code, {})
-        db_name = db_info.get('name')
-        db_suffix = db_info.get('suffix')
-        name = final_parsed_names.get(code) or db_name or COMMON_ETF_MAP.get(code) or f"({code})"
-        df_k, meta_data = fetch_kline_data(code, specific_suffix=db_suffix)
+        name = final_parsed_names.get(code) or db_info.get('name') or COMMON_ETF_MAP.get(code) or f"({code})"
+        df_k, _ = fetch_kline_data(code, specific_suffix=db_info.get('suffix'))
         
         if not df_k.empty:
+            df_k = df_k.sort_index() # 確保時間序列正常
             if target_ts in df_k.index:
                 k_target = df_k.loc[target_ts]
                 past_data = df_k[df_k.index < target_ts]
@@ -218,45 +177,24 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
                 k_target = df_k.iloc[-1]
                 past_data = df_k.iloc[:-1]
             
+            # 🎯 捨棄一切 Meta，絕對信任你清理過的歷史 K 線資料
+            price = float(k_target['Close'])
             if not past_data.empty:
-                is_latest_day = (target_ts >= df_k.index[-1])
-                
-                # -------------------------------------------------------------------
-                # 🎯 【終極防護】解決鴻海變 0 與華邦電 320% 的完美平衡點
-                # -------------------------------------------------------------------
-                base_yest_close = float(past_data.iloc[-1]['Close'])
-                price = float(k_target['Close'])
-                
-                if is_latest_day and meta_data.get('prev_close'):
-                    meta_prev = float(meta_data['prev_close'])
-                    
-                    # 防護 1：若 K 線昨收與今日價格落差 > 10% (通常是減資或除權息) -> 強制用 Meta (救回華邦電)
-                    if abs(price - base_yest_close) / base_yest_close > 0.10:
-                        yest_close = meta_prev
-                        
-                    # 防護 2：若 Meta 昨收等於今日收盤價，且 K 線昨收並不等於今日收盤價
-                    # 代表 Yahoo 盤後提早把 prev_close 蓋成收盤價了！ -> 捨棄 Meta，改用 K 線昨收 (救回鴻海)
-                    elif meta_prev == price and base_yest_close != price:
-                        yest_close = base_yest_close
-                        
-                    # 防護 3：一般正常情況，優先用 Meta 吸收微小除權息落差
-                    else:
-                        yest_close = meta_prev
-                else:
-                    yest_close = base_yest_close
-                
-                change = price - yest_close
-                pct = (change / yest_close) * 100
-                vol = int(k_target['Volume'] / 1000)
-                
-                final_rows.append({
-                    '代碼': code, '商品': name,
-                    '開盤': round(float(k_target['Open']), 2), '最高': round(float(k_target['High']), 2),
-                    '最低': round(float(k_target['Low']), 2), '收盤': round(price, 2), 
-                    '漲跌': round(change, 2), '漲幅%': round(pct, 2), '成交量(張)': vol
-                })
+                yest_close = float(past_data.iloc[-1]['Close'])
+            else:
+                yest_close = float(k_target['Open']) # 只有一天資料時的備案
+            
+            change = price - yest_close
+            pct = (change / yest_close) * 100
+            vol = int(k_target['Volume'] / 1000)
+            
+            final_rows.append({
+                '代碼': code, '商品': name,
+                '開盤': round(float(k_target['Open']), 2), '最高': round(float(k_target['High']), 2),
+                '最低': round(float(k_target['Low']), 2), '收盤': round(price, 2), 
+                '漲跌': round(change, 2), '漲幅%': round(pct, 2), '成交量(張)': vol
+            })
 
-# --- 顯示持股表格 ---
 if final_rows:
     df_final = pd.DataFrame(final_rows)
     def custom_style(row):
@@ -283,39 +221,34 @@ if final_rows:
                   ])
     
     st.subheader(f"💡 {selected_date} 盤勢與持股表現")
-    html_table = styled_df.to_html()
-    st.markdown(html_table, unsafe_allow_html=True)
+    st.markdown(styled_df.to_html(), unsafe_allow_html=True)
     st.divider()
     
     selected_stock_str = st.selectbox("圖表分析：", [f"{r['代碼']} {r['商品']}" for _, r in df_final.iterrows()])
     if selected_stock_str:
         t_code = selected_stock_str.split()[0]
         t_name = selected_stock_str.split()[1]
-        db_suffix = stock_db_dict.get(t_code, {}).get('suffix')
-        df_k, _ = fetch_kline_data(t_code, specific_suffix=db_suffix)
+        df_k, _ = fetch_kline_data(t_code, specific_suffix=stock_db_dict.get(t_code, {}).get('suffix'))
         
         if not df_k.empty:
             df_k['MA5'] = df_k['Close'].rolling(5).mean()
             df_k['MA20'] = df_k['Close'].rolling(20).mean()
             df_k['MA60'] = df_k['Close'].rolling(60).mean()
             
-            # -------------------------------------------------------------------
-            # 📈 主線任務：新增 MACD 計算與 Plotly 三子圖
-            # -------------------------------------------------------------------
+            # 📈 繪製 MACD 三子圖
             df_k['EMA12'] = df_k['Close'].ewm(span=12, adjust=False).mean()
             df_k['EMA26'] = df_k['Close'].ewm(span=26, adjust=False).mean()
             df_k['DIF'] = df_k['EMA12'] - df_k['EMA26']
             df_k['DEA'] = df_k['DIF'].ewm(span=9, adjust=False).mean()
             df_k['MACD_hist'] = df_k['DIF'] - df_k['DEA']
             
-            # 將原本 2 個子圖改為 3 個，並分配高度比例
             fig = make_subplots(
                 rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
-                row_heights=[0.5, 0.2, 0.3], # K線佔50%，成交量20%，MACD佔30%
+                row_heights=[0.5, 0.2, 0.3], 
                 subplot_titles=(f'{t_name} ({t_code}) 日K與均線', '成交量', 'MACD')
             )
             
-            # Row 1: K線與均線
+            # Row 1: K線
             fig.add_trace(go.Candlestick(x=df_k.index, open=df_k['Open'], high=df_k['High'], low=df_k['Low'], close=df_k['Close'], name='K線'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA5'], mode='lines', line=dict(color='purple', width=1.5), name='MA5'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20'), row=1, col=1)
@@ -335,5 +268,4 @@ if final_rows:
             fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(fig, use_container_width=True, config={'modeBarButtonsToAdd': ['drawline', 'eraseshape']})
 else:
-    if selected_date.weekday() < 5: st.info("💡 查無資料。可能原因：\n1. 今日為國定假日未開盤\n2. 目前尚在盤中，資料尚未產出。")
-    else: st.info("💡 週末查無資料，請點選上方日期切換至最近的交易日。")
+    st.info("💡 週末或盤中尚未開盤查無資料，請點選上方日期切換至最近的交易日。")
