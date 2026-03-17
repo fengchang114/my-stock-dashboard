@@ -89,19 +89,17 @@ def save_holdings(holdings_str):
         st.error(f"儲存持股至 Supabase 失敗: {e}")
 
 # ==========================================
-# 工具與抓取函式 (精準 suffix 優化版)
-# ==========================================
-@st.cache_data(ttl=3600)
-# ==========================================
-# 工具與抓取函式 (精準 suffix 優化版)
+# 工具與抓取函式 (終極時區與防呆版)
 # ==========================================
 @st.cache_data(ttl=3600)
 def fetch_kline_data(ticker, specific_suffix=None):
     headers = {'User-Agent': 'Mozilla/5.0'}
     
+    # 🚀 修正 1：嚴格判斷 suffix！
+    # 如果資料庫傳來空字串 ("")，會判定為 False，強制退回使用預設的台股後綴 (.TW / .TWO)
     if ticker.startswith('^'):
         suffixes_to_try = ['']
-    elif specific_suffix is not None:
+    elif specific_suffix: 
         suffixes_to_try = [specific_suffix]
     else:
         suffixes_to_try = ['.TW', '.TWO']
@@ -123,8 +121,11 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     'Volume': quote['volume']
                 })
                 
-                # 🚨 關鍵修正：已移除 + pd.Timedelta(hours=8)，直接將 UTC 日期歸零
-                df.index = pd.to_datetime(result[0]['timestamp'], unit='s').normalize()
+                # 🚀 修正 2：終極時區校正！
+                # 先將 Yahoo 的時間戳記強制轉為真正的「台北時間 (Asia/Taipei)」再進行歸零。
+                # 這樣絕對不會發生「兩天擠在同一天」被誤刪的慘劇！
+                df.index = pd.to_datetime(result[0]['timestamp'], unit='s', utc=True)
+                df.index = df.index.tz_convert('Asia/Taipei').tz_localize(None).normalize()
                 
                 # 處理重複日期與空值
                 df = df[~df.index.duplicated(keep='last')]
