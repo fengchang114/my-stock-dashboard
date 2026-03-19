@@ -12,89 +12,50 @@ st.title("🔥 強弱勢飆股掃描器 (自動更新版)")
 st.markdown("連線證交所與櫃買中心抓取**最新盤後資料**，瞬間篩選出盤面上爆量且高振幅的主力焦點股！")
 
 # ==========================================
-# 1. 自動連線官方 API 抓取最新資料 
+# 1. 自動連線本地資料庫 抓取最新資料 
 # ==========================================
-@st.cache_data(ttl=3600)  
+from supabase import create_client, Client
+
+@st.cache_data(ttl=600)  # 快取設 10 分鐘就好，因為讀資料庫很快
 def load_all_market_data():
-    all_stocks = []
+    # 透過 Streamlit Secrets 建立 Supabase 連線
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(url, key)
     
-    # 加上瀏覽器偽裝，減少被伺服器拒絕的機率
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    }
-    
-    # --- 抓取「上市」最新資料 ---
-    twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
     try:
-        res_twse = requests.get(twse_url, headers=headers, timeout=15, verify=False)
-        if res_twse.status_code == 200:
-            # 防呆：確認回傳的內容真的是 JSON 格式，不是 HTML 錯誤頁面
-            if "application/json" in res_twse.headers.get('Content-Type', ''):
-                for row in res_twse.json():
-                    try:
-                        code = str(row.get('Code', '')).strip()
-                        name = str(row.get('Name', '')).strip()
-                        vol = int(row.get('TradeVolume', 0).replace(',', '')) // 1000
-                        open_p = float(row.get('OpeningPrice', 0).replace(',', ''))
-                        high_p = float(row.get('HighestPrice', 0).replace(',', ''))
-                        low_p = float(row.get('LowestPrice', 0).replace(',', ''))
-                        close_p = float(row.get('ClosingPrice', 0).replace(',', ''))
-                        change = float(row.get('Change', 0).replace(',', ''))
-                        
-                        if vol > 0 and close_p > 0:
-                            all_stocks.append({
-                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
-                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
-                            })
-                    except: continue
-            else:
-                st.warning("⚠️ 證交所伺服器忙碌中，回傳格式異常 (非 JSON)，請稍後再試。")
-                with st.expander("🛠️ 查看伺服器真實回傳內容 (開發者除錯用)"):
-                    st.text(f"Content-Type: {res_twse.headers.get('Content-Type')}")
-                    st.code(res_twse.text[:1000])  # 印出前 1000 個字元
-        else:
-            st.warning(f"⚠️ 證交所連線異常 (狀態碼: {res_twse.status_code})")
-    except Exception as e:
-        st.error(f"上市資料連線發生錯誤: {e}")
+        # 從 Supabase 撈取所有盤後資料 (不限制筆數)
+        response = supabase.table("daily_quotes_cache").select("*").execute()
+        data = response.data
+        
+        if not data:
+            st.warning("⚠️ 資料庫目前為空，請先在本地執行上傳程式。")
+            return pd.DataFrame()
 
-    # --- 抓取「上櫃」最新資料 ---
-    tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
-    try:
-        res_tpex = requests.get(tpex_url, headers=headers, timeout=15, verify=False)
-        if res_tpex.status_code == 200:
-            if "application/json" in res_tpex.headers.get('Content-Type', ''):
-                for row in res_tpex.json():
-                    try:
-                        code = str(row.get('SecuritiesCompanyCode', '')).strip()
-                        name = str(row.get('CompanyName', '')).strip()
-                        vol = int(row.get('TradingVolume', 0).replace(',', '')) 
-                        open_p = float(row.get('Open', 0).replace(',', ''))
-                        high_p = float(row.get('High', 0).replace(',', ''))
-                        low_p = float(row.get('Low', 0).replace(',', ''))
-                        close_p = float(row.get('Close', 0).replace(',', ''))
-                        change = float(row.get('Change', 0).replace(',', ''))
-                        
-                        if vol > 0 and close_p > 0:
-                            all_stocks.append({
-                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
-                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
-                            })
-                    except: continue
-            else:
-                 st.warning("⚠️ 櫃買中心伺服器忙碌中，回傳格式異常 (非 JSON)，請稍後再試。")
-        else:
-            st.warning(f"⚠️ 櫃買中心連線異常 (狀態碼: {res_tpex.status_code})")
-    except Exception as e:
-        st.error(f"上櫃資料連線發生錯誤: {e}")
-
-    # --- 整理成 DataFrame 並計算 ---
-    df = pd.DataFrame(all_stocks)
-    if not df.empty:
+        # 轉成 DataFrame 並將欄位名稱改回您程式原本習慣的中文
+        df = pd.DataFrame(data)
+        df = df.rename(columns={
+            'code': '代碼',
+            'name': '商品',
+            'open_p': '開盤',
+            'high_p': '最高',
+            'low_p': '最低',
+            'close_p': '收盤',
+            'change_val': '漲跌',
+            'vol': '成交量(張)'
+        })
+        
+        # 進行計算 (昨收、漲幅%、振幅%)
         df['昨收'] = df['收盤'] - df['漲跌']
-        df = df[df['昨收'] > 0]
+        df = df[df['昨收'] > 0] # 避免除以零
         df['漲幅%'] = (df['漲跌'] / df['昨收']) * 100
         df['振幅%'] = ((df['最高'] - df['最低']) / df['昨收']) * 100
-    return df
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"讀取 Supabase 資料庫失敗: {e}")
+        return pd.DataFrame()
 
 # ==========================================
 # 2. 篩選介面與邏輯
