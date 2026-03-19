@@ -49,6 +49,9 @@ def load_all_market_data():
                     except: continue
             else:
                 st.warning("⚠️ 證交所伺服器忙碌中，回傳格式異常 (非 JSON)，請稍後再試。")
+                with st.expander("🛠️ 查看伺服器真實回傳內容 (開發者除錯用)"):
+                    st.text(f"Content-Type: {res_twse.headers.get('Content-Type')}")
+                    st.code(res_twse.text[:1000])  # 印出前 1000 個字元
         else:
             st.warning(f"⚠️ 證交所連線異常 (狀態碼: {res_twse.status_code})")
     except Exception as e:
