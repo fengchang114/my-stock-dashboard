@@ -1,22 +1,22 @@
 import streamlit as st
 import pandas as pd
-import requests
 import datetime
-import urllib3  # 新增：用來處理 SSL 警告
+import pytz  # 新增：處理時區問題
+import urllib3
 
 # 關閉忽略 SSL 驗證時產生的警告訊息
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 st.set_page_config(page_title="強弱勢股掃描", layout="wide", page_icon="🔥")
 st.title("🔥 強弱勢飆股掃描器 (自動更新版)")
-st.markdown("連線證交所與櫃買中心抓取**最新盤後資料**，瞬間篩選出盤面上爆量且高振幅的主力焦點股！")
+st.markdown("連線雲端資料庫抓取**最新盤後資料**，瞬間篩選出盤面上爆量且高振幅的主力焦點股！")
 
 # ==========================================
 # 1. 自動連線本地資料庫 抓取最新資料 
 # ==========================================
 from supabase import create_client, Client
 
-@st.cache_data(ttl=600)  # 快取設 10 分鐘就好，因為讀資料庫很快
+@st.cache_data(ttl=600)  # 快取設 10 分鐘
 def load_all_market_data():
     # 透過 Streamlit Secrets 建立 Supabase 連線
     url = st.secrets["SUPABASE_URL"]
@@ -24,7 +24,7 @@ def load_all_market_data():
     supabase: Client = create_client(url, key)
     
     try:
-        # 從 Supabase 撈取所有盤後資料 (不限制筆數)
+        # 從 Supabase 撈取所有盤後資料
         response = supabase.table("daily_quotes_cache").select("*").execute()
         data = response.data
         
@@ -32,7 +32,7 @@ def load_all_market_data():
             st.warning("⚠️ 資料庫目前為空，請先在本地執行上傳程式。")
             return pd.DataFrame()
 
-        # 轉成 DataFrame 並將欄位名稱改回您程式原本習慣的中文
+        # 轉成 DataFrame 並將欄位名稱改回中文
         df = pd.DataFrame(data)
         df = df.rename(columns={
             'code': '代碼',
@@ -60,12 +60,18 @@ def load_all_market_data():
 # ==========================================
 # 2. 篩選介面與邏輯
 # ==========================================
-with st.spinner('連線官方 API 抓取最新行情中，這可能需要幾秒鐘，請稍候...'):
+with st.spinner('從雲端資料庫載入最新行情中，請稍候...'):
     df_all = load_all_market_data()
 
 if df_all.empty:
-    st.error("⚠️ 無法取得行情資料，請稍後再試或檢查網路連線。")
+    st.error("⚠️ 無法取得行情資料，請確認本地端資料是否已上傳。")
 else:
+    # --- 🌟 新增：顯示盤後資料的真實日期 ---
+    if 'trade_date' in df_all.columns:
+        data_date = df_all['trade_date'].iloc[0] 
+        st.info(f"📅 **目前資料庫最新的盤後資料日期為： {data_date}**")
+        df_all = df_all.drop(columns=['trade_date'])
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         scan_type = st.selectbox("🎯 掃描方向", ["📈 強勢多頭 (漲幅>0)", "📉 弱勢空頭 (跌幅<0)"])
@@ -97,13 +103,10 @@ else:
     # ==========================================
     st.divider()
     
-    # 取得今天日期來標示
-    # today_str = datetime.date.today().strftime("%Y-%m-%d")
-    # st.subheader(f"🔍 最新交易日 ({today_str}) 掃描結果：共發現 {len(df_result)} 檔標的")
-
-    # 取得精確的現在時間 (包含時分)
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    st.subheader(f"🔍 最新盤後掃描結果：共發現 {len(df_result)} 檔標的 (報表執行時間：{now_str})")
+    # --- 🌟 新增：使用 pytz 鎖定台灣時區 ---
+    tw_tz = pytz.timezone('Asia/Taipei')
+    now_str = datetime.datetime.now(tw_tz).strftime("%Y-%m-%d %H:%M")
+    st.subheader(f"🔍 最新盤後掃描結果：共發現 {len(df_result)} 檔標的 (網頁重整時間：{now_str})")
     
     if not df_display.empty:
         def custom_style(row):
