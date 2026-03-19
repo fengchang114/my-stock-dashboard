@@ -18,57 +18,71 @@ st.markdown("連線證交所與櫃買中心抓取**最新盤後資料**，瞬間
 def load_all_market_data():
     all_stocks = []
     
+    # 加上瀏覽器偽裝，減少被伺服器拒絕的機率
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    }
+    
     # --- 抓取「上市」最新資料 ---
     twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
     try:
-        # 新增 verify=False 略過 SSL 憑證檢查
-        res_twse = requests.get(twse_url, timeout=10, verify=False)
+        res_twse = requests.get(twse_url, headers=headers, timeout=15, verify=False)
         if res_twse.status_code == 200:
-            for row in res_twse.json():
-                try:
-                    code = str(row.get('Code', '')).strip()
-                    name = str(row.get('Name', '')).strip()
-                    vol = int(row.get('TradeVolume', 0).replace(',', '')) // 1000
-                    open_p = float(row.get('OpeningPrice', 0).replace(',', ''))
-                    high_p = float(row.get('HighestPrice', 0).replace(',', ''))
-                    low_p = float(row.get('LowestPrice', 0).replace(',', ''))
-                    close_p = float(row.get('ClosingPrice', 0).replace(',', ''))
-                    change = float(row.get('Change', 0).replace(',', ''))
-                    
-                    if vol > 0 and close_p > 0:
-                        all_stocks.append({
-                            '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
-                            '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
-                        })
-                except: continue
+            # 防呆：確認回傳的內容真的是 JSON 格式，不是 HTML 錯誤頁面
+            if "application/json" in res_twse.headers.get('Content-Type', ''):
+                for row in res_twse.json():
+                    try:
+                        code = str(row.get('Code', '')).strip()
+                        name = str(row.get('Name', '')).strip()
+                        vol = int(row.get('TradeVolume', 0).replace(',', '')) // 1000
+                        open_p = float(row.get('OpeningPrice', 0).replace(',', ''))
+                        high_p = float(row.get('HighestPrice', 0).replace(',', ''))
+                        low_p = float(row.get('LowestPrice', 0).replace(',', ''))
+                        close_p = float(row.get('ClosingPrice', 0).replace(',', ''))
+                        change = float(row.get('Change', 0).replace(',', ''))
+                        
+                        if vol > 0 and close_p > 0:
+                            all_stocks.append({
+                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
+                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
+                            })
+                    except: continue
+            else:
+                st.warning("⚠️ 證交所伺服器忙碌中，回傳格式異常 (非 JSON)，請稍後再試。")
+        else:
+            st.warning(f"⚠️ 證交所連線異常 (狀態碼: {res_twse.status_code})")
     except Exception as e:
-        st.error(f"上市資料連線失敗: {e}")
+        st.error(f"上市資料連線發生錯誤: {e}")
 
     # --- 抓取「上櫃」最新資料 ---
     tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
     try:
-        # 新增 verify=False 略過 SSL 憑證檢查
-        res_tpex = requests.get(tpex_url, timeout=10, verify=False)
+        res_tpex = requests.get(tpex_url, headers=headers, timeout=15, verify=False)
         if res_tpex.status_code == 200:
-            for row in res_tpex.json():
-                try:
-                    code = str(row.get('SecuritiesCompanyCode', '')).strip()
-                    name = str(row.get('CompanyName', '')).strip()
-                    vol = int(row.get('TradingVolume', 0).replace(',', '')) 
-                    open_p = float(row.get('Open', 0).replace(',', ''))
-                    high_p = float(row.get('High', 0).replace(',', ''))
-                    low_p = float(row.get('Low', 0).replace(',', ''))
-                    close_p = float(row.get('Close', 0).replace(',', ''))
-                    change = float(row.get('Change', 0).replace(',', ''))
-                    
-                    if vol > 0 and close_p > 0:
-                        all_stocks.append({
-                            '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
-                            '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
-                        })
-                except: continue
+            if "application/json" in res_tpex.headers.get('Content-Type', ''):
+                for row in res_tpex.json():
+                    try:
+                        code = str(row.get('SecuritiesCompanyCode', '')).strip()
+                        name = str(row.get('CompanyName', '')).strip()
+                        vol = int(row.get('TradingVolume', 0).replace(',', '')) 
+                        open_p = float(row.get('Open', 0).replace(',', ''))
+                        high_p = float(row.get('High', 0).replace(',', ''))
+                        low_p = float(row.get('Low', 0).replace(',', ''))
+                        close_p = float(row.get('Close', 0).replace(',', ''))
+                        change = float(row.get('Change', 0).replace(',', ''))
+                        
+                        if vol > 0 and close_p > 0:
+                            all_stocks.append({
+                                '代碼': code, '商品': name, '開盤': open_p, '最高': high_p,
+                                '最低': low_p, '收盤': close_p, '漲跌': change, '成交量(張)': vol
+                            })
+                    except: continue
+            else:
+                 st.warning("⚠️ 櫃買中心伺服器忙碌中，回傳格式異常 (非 JSON)，請稍後再試。")
+        else:
+            st.warning(f"⚠️ 櫃買中心連線異常 (狀態碼: {res_tpex.status_code})")
     except Exception as e:
-        st.error(f"上櫃資料連線失敗: {e}")
+        st.error(f"上櫃資料連線發生錯誤: {e}")
 
     # --- 整理成 DataFrame 並計算 ---
     df = pd.DataFrame(all_stocks)
@@ -165,4 +179,3 @@ else:
         st.markdown(styled_df.to_html(), unsafe_allow_html=True)
     else:
         st.info("💡 目前沒有符合上述條件的標的，您可以嘗試放寬「成交量」或「振幅」的條件。")
-
