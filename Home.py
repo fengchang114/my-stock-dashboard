@@ -267,11 +267,23 @@ if final_rows:
             # 取得最後一筆資料（最新的一天）的 CDP 數值
             latest_cdp = df_k.iloc[-1]
             
-            fig.add_hline(y=latest_cdp['AH'], line_dash="dot", line_color="rgba(255, 0, 0, 0.5)", annotation_text=f"AH: {latest_cdp['AH']:.2f}", row=1, col=1)
-            fig.add_hline(y=latest_cdp['NH'], line_dash="dot", line_color="rgba(255, 165, 0, 0.5)", annotation_text=f"NH: {latest_cdp['NH']:.2f}", row=1, col=1)
-            fig.add_hline(y=latest_cdp['CDP'], line_dash="dash", line_color="rgba(128, 128, 128, 0.5)", annotation_text=f"CDP: {latest_cdp['CDP']:.2f}", row=1, col=1)
-            fig.add_hline(y=latest_cdp['NL'], line_dash="dot", line_color="rgba(144, 238, 144, 0.5)", annotation_text=f"NL: {latest_cdp['NL']:.2f}", row=1, col=1)
-            fig.add_hline(y=latest_cdp['AL'], line_dash="dot", line_color="rgba(0, 128, 0, 0.5)", annotation_text=f"AL: {latest_cdp['AL']:.2f}", row=1, col=1)
+           # --- 新增 CDP 水平線繪製區塊 ---
+            # 取得最後一筆資料（最新的一天）的 CDP 數值
+            latest_cdp = df_k.iloc[-1]
+            
+            # 設定共用的文字樣式：位置靠右上方、加上白底半透明背景避免與K線重疊
+            anno_kwargs = dict(
+                annotation_position="top right", 
+                annotation_bgcolor="rgba(255, 255, 255, 0.85)", # 85% 不透明的白底
+                annotation_font_size=12
+            )
+
+            fig.add_hline(y=latest_cdp['AH'], line_dash="dot", line_color="rgba(255, 0, 0, 0.5)", annotation_text=f"AH: {latest_cdp['AH']:.2f}", annotation_font_color="red", **anno_kwargs, row=1, col=1)
+            fig.add_hline(y=latest_cdp['NH'], line_dash="dot", line_color="rgba(255, 165, 0, 0.8)", annotation_text=f"NH: {latest_cdp['NH']:.2f}", annotation_font_color="#d97700", **anno_kwargs, row=1, col=1)
+            fig.add_hline(y=latest_cdp['CDP'], line_dash="dash", line_color="rgba(128, 128, 128, 0.5)", annotation_text=f"CDP: {latest_cdp['CDP']:.2f}", annotation_font_color="#555555", **anno_kwargs, row=1, col=1)
+            fig.add_hline(y=latest_cdp['NL'], line_dash="dot", line_color="rgba(144, 238, 144, 0.8)", annotation_text=f"NL: {latest_cdp['NL']:.2f}", annotation_font_color="#2ca02c", **anno_kwargs, row=1, col=1)
+            fig.add_hline(y=latest_cdp['AL'], line_dash="dot", line_color="rgba(0, 128, 0, 0.5)", annotation_text=f"AL: {latest_cdp['AL']:.2f}", annotation_font_color="darkgreen", **anno_kwargs, row=1, col=1)
+            
             # -------------------------------
             
             # Row 2: 成交量
