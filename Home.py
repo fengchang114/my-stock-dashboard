@@ -88,7 +88,6 @@ def fetch_kline_data(ticker, specific_suffix=None):
                 df.index = pd.to_datetime(result[0]['timestamp'], unit='s', utc=True)
                 df.index = df.index.tz_convert('Asia/Taipei').tz_localize(None).normalize()
                 
-                # 你原本寫的這兩行非常強大，已經完美解決了破洞問題！
                 df = df[~df.index.duplicated(keep='last')]
                 df = df.dropna(subset=['Close']).ffill()
                 
@@ -97,7 +96,6 @@ def fetch_kline_data(ticker, specific_suffix=None):
                     reg_vol = meta.get('regularMarketVolume', 0)
                     if reg_vol > 0: df.iloc[-1, df.columns.get_loc('Volume')] = reg_vol
                 
-                # 回傳空字典避免打亂舊的快取解包
                 return df, {} 
         except: 
             continue
@@ -169,7 +167,7 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
         df_k, _ = fetch_kline_data(code, specific_suffix=db_info.get('suffix'))
         
         if not df_k.empty:
-            df_k = df_k.sort_index() # 確保時間序列正常
+            df_k = df_k.sort_index()
             if target_ts in df_k.index:
                 k_target = df_k.loc[target_ts]
                 past_data = df_k[df_k.index < target_ts]
@@ -177,12 +175,11 @@ with st.spinner('從雲端資料庫調閱資料與精算行情中...'):
                 k_target = df_k.iloc[-1]
                 past_data = df_k.iloc[:-1]
             
-            # 🎯 捨棄一切 Meta，絕對信任你清理過的歷史 K 線資料
             price = float(k_target['Close'])
             if not past_data.empty:
                 yest_close = float(past_data.iloc[-1]['Close'])
             else:
-                yest_close = float(k_target['Open']) # 只有一天資料時的備案
+                yest_close = float(k_target['Open'])
             
             change = price - yest_close
             pct = (change / yest_close) * 100
@@ -235,6 +232,18 @@ if final_rows:
             df_k['MA20'] = df_k['Close'].rolling(20).mean()
             df_k['MA60'] = df_k['Close'].rolling(60).mean()
             
+            # --- 新增 CDP 計算區塊 ---
+            prev_H = df_k['High'].shift(1)
+            prev_L = df_k['Low'].shift(1)
+            prev_C = df_k['Close'].shift(1)
+            
+            df_k['CDP'] = (prev_H + prev_L + 2 * prev_C) / 4
+            df_k['AH'] = df_k['CDP'] + (prev_H - prev_L)
+            df_k['NH'] = 2 * df_k['CDP'] - prev_L
+            df_k['NL'] = 2 * df_k['CDP'] - prev_H
+            df_k['AL'] = df_k['CDP'] - (prev_H - prev_L)
+            # -------------------------
+            
             # 📈 繪製 MACD 三子圖
             df_k['EMA12'] = df_k['Close'].ewm(span=12, adjust=False).mean()
             df_k['EMA26'] = df_k['Close'].ewm(span=26, adjust=False).mean()
@@ -245,7 +254,7 @@ if final_rows:
             fig = make_subplots(
                 rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
                 row_heights=[0.5, 0.2, 0.3], 
-                subplot_titles=(f'{t_name} ({t_code}) 日K與均線', '成交量', 'MACD')
+                subplot_titles=(f'{t_name} ({t_code}) 日K與均線 (含今日CDP支撐壓力)', '成交量', 'MACD')
             )
             
             # Row 1: K線
@@ -253,6 +262,17 @@ if final_rows:
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA5'], mode='lines', line=dict(color='purple', width=1.5), name='MA5'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA20'], mode='lines', line=dict(color='orange', width=1.5), name='MA20'), row=1, col=1)
             fig.add_trace(go.Scatter(x=df_k.index, y=df_k['MA60'], mode='lines', line=dict(color='blue', width=1.5), name='MA60'), row=1, col=1)
+            
+            # --- 新增 CDP 水平線繪製區塊 ---
+            # 取得最後一筆資料（最新的一天）的 CDP 數值
+            latest_cdp = df_k.iloc[-1]
+            
+            fig.add_hline(y=latest_cdp['AH'], line_dash="dot", line_color="rgba(255, 0, 0, 0.5)", annotation_text=f"AH: {latest_cdp['AH']:.2f}", row=1, col=1)
+            fig.add_hline(y=latest_cdp['NH'], line_dash="dot", line_color="rgba(255, 165, 0, 0.5)", annotation_text=f"NH: {latest_cdp['NH']:.2f}", row=1, col=1)
+            fig.add_hline(y=latest_cdp['CDP'], line_dash="dash", line_color="rgba(128, 128, 128, 0.5)", annotation_text=f"CDP: {latest_cdp['CDP']:.2f}", row=1, col=1)
+            fig.add_hline(y=latest_cdp['NL'], line_dash="dot", line_color="rgba(144, 238, 144, 0.5)", annotation_text=f"NL: {latest_cdp['NL']:.2f}", row=1, col=1)
+            fig.add_hline(y=latest_cdp['AL'], line_dash="dot", line_color="rgba(0, 128, 0, 0.5)", annotation_text=f"AL: {latest_cdp['AL']:.2f}", row=1, col=1)
+            # -------------------------------
             
             # Row 2: 成交量
             v_colors = ['red' if c >= o else 'green' for c, o in zip(df_k['Close'], df_k['Open'])]
